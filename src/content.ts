@@ -35,7 +35,7 @@ const createBackground = (renderer: string) => {
 const state = { trackKey: "", trackGUID: "", titleKey: "", trackCacheKey: "", currentTrack: null as { guid: string; title?: string; artist?: string; durationMs?: number } | null, root: null as HTMLElement | null, app: null as ReturnType<typeof createApp> | null, backgroundRoot: null as HTMLElement | null, backgroundHost: null as HTMLElement | null, background: null as BackgroundInstance | null, backgroundRenderer: "mesh", backgroundPlaying: true, backgroundAlbum: "", backgroundFallback: false, original: null as HTMLElement | null, loadingKey: "", loadToken: 0, lastTime: -1, loadStarted: 0, firstLyricAt: 0, raf: 0, bridge: null as PlaybackAnchor | null, lowFreqVolume: 1, alignPosition: 0.3 };
 const LYRIC_CACHE_VERSION = 2;
 const lyricCache = new Map<string, { source: Source; format: LyricFormat; lines: LyricLine[]; raw: string; matched?: string; confidence?: number; at: number; v?: number; fallback?: boolean }>();
-const lyricSizePresets: Record<string, string> = { tiny: "14px", "extra-small": "16px", small: "18px", medium: "22px", large: "26px", "extra-large": "30px", huge: "36px" };
+const lyricSizePresets: Record<string, string> = { tiny: "max(2.5vh, 1.25vw, 18px)", "extra-small": "max(3vh, 1.5vw, 20px)", small: "max(3.5vh, 1.75vw, 22px)", medium: "max(4.2vh, 2.1vw, 26px)", large: "max(5vh, 2.5vw, 30px)", "extra-large": "max(5.8vh, 2.9vw, 34px)", huge: "max(6.6vh, 3.3vw, 38px)" };
 const cacheReady = chrome.storage.local.get({ lyricCache: {} }).then(({ lyricCache: saved }) => {
   if (!saved || typeof saved !== "object") return;
   for (const [key, value] of Object.entries(saved as Record<string, unknown>)) {
