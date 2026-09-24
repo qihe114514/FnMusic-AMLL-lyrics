@@ -217,34 +217,48 @@ function forcePlayerLayout() {
   }
 }
 
-function applyLinesToPlayer(force = false) {
+function setPlayerLyrics() {
   const player = getAmllPlayer() as PlayerWithLyrics | undefined;
   if (!player?.setLyricLines || !displayLines.value.length) return false;
-  const renderedLines = player.getLyricLines?.() ?? [];
-  if (!force && renderedLines.length === displayLines.value.length) {
-    if (!hasRenderedLyricLine()) forcePlayerLayout();
-    return true;
-  }
   try {
     const time = currentTime.value + Number(settings.value.offset || 0);
     player.setLyricLines(displayLines.value, time);
     player.setCurrentTime?.(time, true);
-    forcePlayerLayout();
-    if (force) {
-      const token = state.loadToken;
-      const track = state.trackKey;
-      const retry = () => {
-        if (token !== state.loadToken || track !== state.trackKey) return;
-        forcePlayerLayout();
-      };
-      window.setTimeout(retry, 0);
-      window.setTimeout(retry, 350);
-    }
     return true;
   } catch (error) {
     console.warn("[FnMusic AMLL] 歌词行应用失败：", error);
     return false;
   }
+}
+
+/**
+ * 正常切歌时让 AMLL 自己用弹簧动画入场。
+ * 只有歌词没有真正写进播放器，或弹簧已经结束但 DOM 里仍没有歌词行时，才强制布局兜底。
+ */
+function ensureLyricsVisible() {
+  const player = getAmllPlayer() as PlayerWithLyrics | undefined;
+  if (!player?.setLyricLines || !displayLines.value.length) return false;
+  const renderedLineCount = player.getLyricLines?.()?.length ?? 0;
+  if (renderedLineCount !== displayLines.value.length) {
+    setPlayerLyrics();
+    window.setTimeout(() => {
+      if (!hasRenderedLyricLine()) forcePlayerLayout();
+    }, 260);
+    return true;
+  }
+  if (!hasRenderedLyricLine()) forcePlayerLayout();
+  return true;
+}
+
+function scheduleLyricsFallback() {
+  const token = state.loadToken;
+  const track = state.trackKey;
+  const check = () => {
+    if (token !== state.loadToken || track !== state.trackKey) return;
+    ensureLyricsVisible();
+  };
+  window.setTimeout(check, 500);
+  window.setTimeout(check, 1500);
 }
 
 function seekToLine(event: { lineIndex: number }) {
@@ -397,7 +411,7 @@ function showAmll() {
   syncBackground(native);
   state.original = native;
   mount(host);
-  applyLinesToPlayer(true);
+  scheduleLyricsFallback();
   native.style.setProperty("display", "none", "important");
   state.root?.classList.add("is-visible");
   state.root?.classList.remove("is-loading", "no-lyrics");
@@ -717,7 +731,7 @@ function syncTrack() {
   const currentTitleKey = `${song.title}|${document.querySelector<HTMLInputElement>('[aria-label="播放进度"]')?.max || ""}`;
   if (key !== state.trackKey && !(state.titleKey === currentTitleKey && !state.trackGUID.startsWith("__title__"))) void loadTrack(key);
   if (state.root?.classList.contains("is-visible")) {
-    if (lines.value.length) applyLinesToPlayer();
+    if (lines.value.length) ensureLyricsVisible();
     native.style.setProperty("display", "none", "important");
   }
 }

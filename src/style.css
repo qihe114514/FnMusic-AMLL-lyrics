@@ -10,6 +10,12 @@ html, body, body * { font-family: "Microsoft YaHei", "PingFang SC", "Noto Sans C
 #fnmusic-amll-root .amll-lyric-player { font-weight: var(--amll-lp-font-weight, 600); }
 #fnmusic-amll-root .amll-lyric-player [class*="subLine"] { display: var(--amll-translation-display, block); }
 #fnmusic-amll-root .amll-lyric-player { position: absolute; inset: 0; overflow: hidden; box-sizing: border-box; scrollbar-width: none; -ms-overflow-style: none; }
+#fnmusic-amll-root .amll-lyric-player {
+  -webkit-mask-image: linear-gradient(to bottom, transparent 0%, rgba(0,0,0,.48) 7%, #000 14%, #000 86%, rgba(0,0,0,.48) 93%, transparent 100%);
+  mask-image: linear-gradient(to bottom, transparent 0%, rgba(0,0,0,.48) 7%, #000 14%, #000 86%, rgba(0,0,0,.48) 93%, transparent 100%);
+  -webkit-mask-repeat: no-repeat;
+  mask-repeat: no-repeat;
+}
 .music-player-karaoke-lyrics { scrollbar-width: none; -ms-overflow-style: none; }
 #fnmusic-amll-root .FmKaba_lyricSubLine { display: var(--amll-translation-display, block); }
 #fnmusic-amll-root .FmKaba_romanWord { display: var(--amll-roman-display, block); }
