@@ -2,14 +2,50 @@
   "manifest_version": 3,
   "name": "FnMusic AMLL lyrics",
   "short_name": "FnMusic AMLL",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "在 FnMusic（飞牛音乐）中使用 Apple Music 风格歌词。",
-  "permissions": ["storage", "activeTab"],
-  "host_permissions": ["http://192.168.1.11:5666/*", "https://www.qihe0507.top:5667/*", "https://api.amll.dev/*", "https://amlldb.bikonoo.com/*", "https://music.163.com/*", "https://mobileservice.kugou.com/*", "https://krcs.kugou.com/*", "https://lyrics.kugou.com/*"],
-  "background": {"service_worker": "background.js"},
-  "action": {"default_title": "FnMusic AMLL lyrics 设置", "default_popup": "popup.html"},
+  "permissions": [
+    "storage",
+    "activeTab"
+  ],
+  "host_permissions": [
+    "http://192.168.1.11:5666/*",
+    "https://www.qihe0507.top:5667/*",
+    "https://api.amll.dev/*",
+    "https://amlldb.bikonoo.com/*",
+    "https://music.163.com/*",
+    "https://mobileservice.kugou.com/*",
+    "https://krcs.kugou.com/*",
+    "https://lyrics.kugou.com/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_title": "FnMusic AMLL lyrics 设置",
+    "default_popup": "popup.html"
+  },
   "content_scripts": [
-    {"matches": ["http://*/music*", "https://*/music*"], "js": ["bridge.js"], "run_at": "document_start", "world": "MAIN"},
-    {"matches": ["http://*/music*", "https://*/music*"], "js": ["content.js"], "run_at": "document_idle"}
+    {
+      "matches": [
+        "http://*/music*",
+        "https://*/music*"
+      ],
+      "js": [
+        "bridge.js"
+      ],
+      "run_at": "document_start",
+      "world": "MAIN"
+    },
+    {
+      "matches": [
+        "http://*/music*",
+        "https://*/music*"
+      ],
+      "js": [
+        "content.js"
+      ],
+      "run_at": "document_idle"
+    }
   ]
 }
