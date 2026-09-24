@@ -13,7 +13,7 @@ import { bindWheelScroll, type AmllPlayerLike } from "./scroll-adapter";
 
 type Source = ProviderName | "none";
 type ProviderAttemptDebug = { source: string; ok: boolean; durationMs?: number; confidence?: number; error?: string; debug?: string };
-type DebugInfo = { source: Source; format: LyricFormat; matched?: string; status: string; rawPreview: string; at: string; confidence?: number; durationMs?: number; attempts?: ProviderAttemptDebug[] };
+type DebugInfo = { source: Source; format: LyricFormat; matched?: string; status: string; rawPreview: string; at: string; confidence?: number; durationMs?: number; attempts?: ProviderAttemptDebug[]; dom?: { rootClass?: string; rootDisplay?: string; playerText?: string; playerChildren?: number } };
 type ProviderResult = { source: ExternalProviderName; format: LyricFormat; text: string; translation?: string; romanization?: string; matched?: string; debug?: string; confidence?: number; qualified?: boolean; matchReason?: string };
 type ParsedResult = { source: ProviderName; format: LyricFormat; lines: LyricLine[]; raw: string; matched?: string; confidence: number; debug?: string; qualified: boolean; matchReason?: string; fallback?: boolean };
 
@@ -24,31 +24,25 @@ const playing = ref(false);
 const settings = ref<Settings>({ ...DEFAULT_SETTINGS });
 const playerRef = shallowRef<any>(null);
 type BackgroundInstance = { setRenderScale(scale: number): void; setFPS(fps: number): void; setStaticMode(enable: boolean): void; setLowFreqVolume(volume: number): void; setHasLyric(hasLyric: boolean): void; setAlbum(album: string | HTMLImageElement): Promise<void>; pause(): void; resume(): void; getElement(): HTMLElement; dispose(): void };
-let webglFloatSupport: boolean | null = null;
 
-function supportsFloatRenderTarget() {
-  if (webglFloatSupport !== null) return webglFloatSupport;
-  try {
-    const canvas = document.createElement("canvas");
-    const gl = canvas.getContext("webgl2", { alpha: true, antialias: false, depth: false, stencil: false, premultipliedAlpha: false });
-    webglFloatSupport = !!gl?.getExtension("EXT_color_buffer_float");
-    gl?.getExtension("WEBGL_lose_context")?.loseContext();
-  } catch {
-    webglFloatSupport = false;
-  }
-  return webglFloatSupport;
-}
+// AMLL Core 的 MeshGradientRenderer 会检查 WebGL1 的浮点纹理扩展。
+// 在部分 Chrome + ANGLE 组合下这些扩展不会暴露，但渲染器仍可正常工作；
+// 这里仅屏蔽这几条已知无害的 Core 警告，初始化失败仍然由 catch 处理。
+const IGNORED_BACKGROUND_WARNINGS = /^(EXT_color_buffer_float|EXT_float_blend|OES_texture_float_linear|OES_texture_float) not supported$/;
 
 const createBackground = (renderer: string) => {
-  if (!supportsFloatRenderTarget()) {
-    console.warn("[FnMusic AMLL] 当前浏览器不支持 EXT_color_buffer_float，已跳过 AMLL 背景渲染。");
-    return null;
-  }
+  const originalWarn = console.warn;
+  console.warn = (...args: unknown[]) => {
+    if (typeof args[0] === "string" && IGNORED_BACKGROUND_WARNINGS.test(args[0])) return;
+    originalWarn.apply(console, args);
+  };
   try {
     return CoreBackgroundRender.new((renderer === "pixi" ? PixiRenderer : MeshGradientRenderer) as typeof MeshGradientRenderer) as BackgroundInstance;
   } catch (error) {
-    console.warn("[FnMusic AMLL] 背景渲染器初始化失败，已退化为无背景模式：", error);
+    originalWarn.call(console, "[FnMusic AMLL] 背景渲染器初始化失败，已退化为无背景模式：", error);
     return null;
+  } finally {
+    console.warn = originalWarn;
   }
 };
 const state = { trackKey: "", trackGUID: "", titleKey: "", trackCacheKey: "", currentTrack: null as { guid: string; title?: string; artist?: string; durationMs?: number } | null, root: null as HTMLElement | null, app: null as ReturnType<typeof createApp> | null, backgroundRoot: null as HTMLElement | null, backgroundHost: null as HTMLElement | null, background: null as BackgroundInstance | null, backgroundRenderer: "mesh", backgroundPlaying: true, backgroundAlbum: "", backgroundFallback: false, original: null as HTMLElement | null, loadingKey: "", loadToken: 0, lastTime: -1, loadStarted: 0, firstLyricAt: 0, raf: 0, bridge: null as PlaybackAnchor | null, lowFreqVolume: 1, alignPosition: 0.3 };
@@ -105,6 +99,13 @@ function readArtistFromDialog(dialog: HTMLElement | null, title: string) {
 function findNativeLyrics() { return document.querySelector<HTMLElement>(".music-player-karaoke-live-track"); }
 function findViewport(target?: HTMLElement | null) { return target?.closest<HTMLElement>(".music-player-karaoke-lyrics") || document.querySelector<HTMLElement>(".music-player-karaoke-lyrics"); }
 function findFullscreenDialog(target?: HTMLElement | null) { return target?.closest<HTMLElement>('[role="dialog"]') || null; }
+function findMountHost(target?: HTMLElement | null) {
+  const viewport = findViewport(target);
+  if (!viewport) return null;
+  const parent = viewport.parentElement;
+  if (parent && getComputedStyle(parent).position !== "static") return parent;
+  return viewport;
+}
 
 function joinSegmentText(node: HTMLElement) {
   const segments = [...node.querySelectorAll<HTMLElement>(".music-player-karaoke-segment, [data-karaoke-segment]")];
@@ -191,6 +192,59 @@ async function persistCache(key: string, entry: Omit<NonNullable<ReturnType<type
 function getAmllPlayer(): AmllPlayerLike | undefined {
   const exposed = playerRef.value?.lyricPlayer;
   return (exposed?.value ?? exposed) as AmllPlayerLike | undefined;
+}
+
+type PlayerWithLyrics = AmllPlayerLike & {
+  setLyricLines?: (lines: LyricLine[], initialTime?: number) => void;
+  getLyricLines?: () => LyricLine[];
+  update?: (delta?: number) => void;
+};
+
+function hasRenderedLyricLine() {
+  return !!state.root?.querySelector(".FmKaba_lyricLineWrapper");
+}
+
+function forcePlayerLayout() {
+  const player = getAmllPlayer() as PlayerWithLyrics | undefined;
+  if (!player?.calcLayout) return false;
+  try {
+    player.calcLayout(true, true);
+    player.update?.(0);
+    return true;
+  } catch (error) {
+    console.warn("[FnMusic AMLL] 歌词布局失败：", error);
+    return false;
+  }
+}
+
+function applyLinesToPlayer(force = false) {
+  const player = getAmllPlayer() as PlayerWithLyrics | undefined;
+  if (!player?.setLyricLines || !displayLines.value.length) return false;
+  const renderedLines = player.getLyricLines?.() ?? [];
+  if (!force && renderedLines.length === displayLines.value.length) {
+    if (!hasRenderedLyricLine()) forcePlayerLayout();
+    return true;
+  }
+  try {
+    const time = currentTime.value + Number(settings.value.offset || 0);
+    player.setLyricLines(displayLines.value, time);
+    player.setCurrentTime?.(time, true);
+    forcePlayerLayout();
+    if (force) {
+      const token = state.loadToken;
+      const track = state.trackKey;
+      const retry = () => {
+        if (token !== state.loadToken || track !== state.trackKey) return;
+        forcePlayerLayout();
+      };
+      window.setTimeout(retry, 0);
+      window.setTimeout(retry, 350);
+    }
+    return true;
+  } catch (error) {
+    console.warn("[FnMusic AMLL] 歌词行应用失败：", error);
+    return false;
+  }
 }
 
 function seekToLine(event: { lineIndex: number }) {
@@ -325,11 +379,11 @@ function showOriginal() {
 
 function claimAmll() {
   const native = findNativeLyrics();
-  const viewport = findViewport(native);
-  if (!native || !viewport) return false;
+  const host = findMountHost(native);
+  if (!native || !host) return false;
   try { syncBackground(native); } catch (error) { console.warn("[FnMusic AMLL] 背景初始化异常，继续加载歌词：", error); }
   state.original = native;
-  mount(viewport);
+  mount(host);
   native.style.setProperty("display", "none", "important");
   state.root?.classList.add("is-visible", "is-loading", "no-lyrics");
   return true;
@@ -337,12 +391,13 @@ function claimAmll() {
 
 function showAmll() {
   const native = findNativeLyrics();
-  const viewport = findViewport(native);
-  if (!native || !viewport || !lines.value.length) return;
+  const host = findMountHost(native);
+  if (!native || !host || !lines.value.length) return;
   refreshDisplayLines();
   syncBackground(native);
   state.original = native;
-  mount(viewport);
+  mount(host);
+  applyLinesToPlayer(true);
   native.style.setProperty("display", "none", "important");
   state.root?.classList.add("is-visible");
   state.root?.classList.remove("is-loading", "no-lyrics");
@@ -388,7 +443,15 @@ async function saveDebug(debug: DebugInfo) {
 }
 
 function setDebug(source: Source, format: LyricFormat, status: string, raw: string, matched?: string, confidence?: number, durationMs?: number, attempts?: ProviderAttemptDebug[]) {
-  void saveDebug({ source, format, status, matched, rawPreview: raw.slice(0, 1000), at: new Date().toISOString(), confidence, durationMs, attempts });
+  const root = document.querySelector<HTMLElement>("#fnmusic-amll-root");
+  const player = root?.querySelector<HTMLElement>(".amll-lyric-player");
+  const dom = {
+    rootClass: root?.className,
+    rootDisplay: root ? getComputedStyle(root).display : "missing",
+    playerText: player?.innerText?.replace(/\s+/g, " ").trim().slice(0, 200),
+    playerChildren: player?.childElementCount,
+  };
+  void saveDebug({ source, format, status, matched, rawPreview: raw.slice(0, 1000), at: new Date().toISOString(), confidence, durationMs, attempts, dom });
 }
 
 async function loadFeiniu(guid: string, payload?: unknown) {
@@ -642,17 +705,21 @@ function syncTrack() {
   if (!isFeiniuPlayer()) return;
   const native = findNativeLyrics();
   const viewport = findViewport(native);
-  if (!native || !viewport) return;
+  const host = findMountHost(native);
+  if (!native || !viewport || !host) return;
   native.querySelectorAll<HTMLElement>(".music-player-karaoke-live-time").forEach((node) => node.style.setProperty("display", "none", "important"));
   const song = readSong();
   const key = trackKey(song);
-  if (state.root && viewport && state.root.parentElement !== viewport) viewport.appendChild(state.root);
+  if (state.root && state.root.parentElement !== host) host.appendChild(state.root);
   updateAlignPosition(viewport);
   syncBackground(native);
-  if (native && viewport && !state.root) claimAmll();
+  if (!state.root) claimAmll();
   const currentTitleKey = `${song.title}|${document.querySelector<HTMLInputElement>('[aria-label="播放进度"]')?.max || ""}`;
   if (key !== state.trackKey && !(state.titleKey === currentTitleKey && !state.trackGUID.startsWith("__title__"))) void loadTrack(key);
-  if (state.root?.classList.contains("is-visible") && native) native.style.setProperty("display", "none", "important");
+  if (state.root?.classList.contains("is-visible")) {
+    if (lines.value.length) applyLinesToPlayer();
+    native.style.setProperty("display", "none", "important");
+  }
 }
 
 function syncDisplayedProgress(now = performance.now()) {
