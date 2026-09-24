@@ -1,0 +1,536 @@
+import { createApp, h, ref, shallowRef } from "vue";
+import { LyricPlayer } from "@applemusic-like-lyrics/vue";
+import { BackgroundRender as CoreBackgroundRender, MeshGradientRenderer, PixiRenderer } from "@applemusic-like-lyrics/core";
+import "@applemusic-like-lyrics/core/style.css";
+import "./style.css";
+import { resolvePlaybackClock, type PlaybackAnchor } from "./playback-clock";
+import { linesToTtml, mergeRomanization, mergeTranslation, normalizeLyrics, parseLyricText, type LyricFormat, type LyricLine, type Song } from "./shared";
+import { DEFAULT_SETTINGS, PROVIDER_PRIORITY, SOURCE_TIMEOUT_MS, type ExternalProviderName, type ProviderName, type Settings } from "./settings";
+import { normalizeSongKey } from "./matcher";
+import { bindWheelScroll, type AmllPlayerLike } from "./scroll-adapter";
+
+type Source = ProviderName | "none";
+type DebugInfo = { source: Source; format: LyricFormat; matched?: string; status: string; rawPreview: string; at: string; confidence?: number; durationMs?: number };
+type ProviderResult = { source: ExternalProviderName; format: LyricFormat; text: string; translation?: string; romanization?: string; matched?: string; debug?: string; confidence?: number; qualified?: boolean; matchReason?: string };
+type ParsedResult = { source: ProviderName; format: LyricFormat; lines: LyricLine[]; raw: string; matched?: string; confidence: number; debug?: string; qualified: boolean; matchReason?: string };
+
+const lines = shallowRef<LyricLine[]>([]);
+const displayLines = shallowRef<LyricLine[]>([]);
+const currentTime = ref(0);
+const playing = ref(false);
+const settings = ref<Settings>({ ...DEFAULT_SETTINGS });
+const playerRef = shallowRef<any>(null);
+type BackgroundInstance = { setRenderScale(scale: number): void; setFPS(fps: number): void; setStaticMode(enable: boolean): void; setLowFreqVolume(volume: number): void; setHasLyric(hasLyric: boolean): void; setAlbum(album: string | HTMLImageElement): Promise<void>; pause(): void; resume(): void; getElement(): HTMLElement; dispose(): void };
+const createBackground = (renderer: string) => CoreBackgroundRender.new((renderer === "pixi" ? PixiRenderer : MeshGradientRenderer) as typeof MeshGradientRenderer) as BackgroundInstance;
+const state = { trackKey: "", trackGUID: "", titleKey: "", trackCacheKey: "", root: null as HTMLElement | null, app: null as ReturnType<typeof createApp> | null, backgroundRoot: null as HTMLElement | null, backgroundHost: null as HTMLElement | null, background: null as BackgroundInstance | null, backgroundRenderer: "mesh", backgroundPlaying: true, backgroundAlbum: "", original: null as HTMLElement | null, loadToken: 0, lastTime: -1, loadStarted: 0, firstLyricAt: 0, raf: 0, bridge: null as PlaybackAnchor | null, lowFreqVolume: 1, alignPosition: 0.3 };
+const lyricCache = new Map<string, { source: Source; format: LyricFormat; lines: LyricLine[]; raw: string; matched?: string; confidence?: number; at: number }>();
+const lyricSizePresets: Record<string, string> = { tiny: "14px", "extra-small": "16px", small: "18px", medium: "22px", large: "26px", "extra-large": "30px", huge: "36px" };
+const cacheReady = chrome.storage.local.get({ lyricCache: {} }).then(({ lyricCache: saved }) => {
+  if (!saved || typeof saved !== "object") return;
+  for (const [key, value] of Object.entries(saved as Record<string, unknown>)) {
+    const item = value as Partial<{ source: Source; format: LyricFormat; lines: LyricLine[]; raw: string; matched?: string; confidence?: number; at: number }>;
+    if ((item as { source?: string }).source === "qq") continue;
+    if (Array.isArray(item.lines) && item.lines.length && typeof item.raw === "string") lyricCache.set(key, { source: item.source || "none", format: item.format || "ttml", lines: item.lines, raw: item.raw, matched: item.matched, confidence: item.confidence, at: Number(item.at) || Date.now() });
+  }
+}).catch(() => {});
+
+function isFeiniuPlayer() {
+  return !!document.querySelector('.music-player-karaoke-lyrics, .music-player-progress-input, [aria-label="播放进度"]')
+    && !!document.querySelector('.music-player-track-entry, [aria-label="全屏显示"], [aria-label="播放进度"]');
+}
+
+function readSong(): Song {
+  const node = [...document.querySelectorAll<HTMLElement>("[data-track-guid], [data-track-guid-id], [data-guid]")].find((item) => item.dataset.trackGuid || item.dataset.trackGuidId || item.dataset.guid);
+  const dialog = document.querySelector<HTMLElement>('[role="dialog"][aria-label]');
+  const title = dialog?.getAttribute("aria-label")?.trim() || document.title.split("-")[0].trim();
+  const artist = [...(dialog?.querySelectorAll<HTMLElement>("button") || [])].map((button) => button.textContent?.replace(/\s+/g, " ").trim()).find((text) => !!text && text !== title);
+  const guid = node?.dataset.trackGuid || node?.dataset.trackGuidId || node?.dataset.guid || `__title__${title}`;
+  return { title, artist, guid };
+}
+
+function findNativeLyrics() { return document.querySelector<HTMLElement>(".music-player-karaoke-live-track"); }
+function findViewport(target?: HTMLElement | null) { return target?.closest<HTMLElement>(".music-player-karaoke-lyrics") || document.querySelector<HTMLElement>(".music-player-karaoke-lyrics"); }
+function findFullscreenDialog(target?: HTMLElement | null) { return target?.closest<HTMLElement>('[role="dialog"]') || null; }
+function readNativeText() { return [...document.querySelectorAll<HTMLElement>('.music-player-karaoke-live-track [data-karaoke-line="true"]')].map((node) => node.textContent?.replace(/\s+/g, " ").trim()).filter(Boolean).join("\n"); }
+function trackKey(song: Song) { const slider = document.querySelector<HTMLInputElement>('[aria-label="播放进度"]'); return `${song.guid}|${song.title}|${slider?.max || ""}`; }
+function songDurationMs() { return Number(document.querySelector<HTMLInputElement>('[aria-label="播放进度"]')?.max || 0) * 1000; }
+function songCacheKey(song: Song) { return normalizeSongKey({ title: song.title, artist: song.artist, durationMs: songDurationMs() }); }
+function enabledExternalProviders(): ExternalProviderName[] {
+  if (!settings.value.externalLyricsEnabled) return [];
+  return [
+    ...(settings.value.useAmlldb ? ["amll" as const] : []),
+    ...(settings.value.useKugou ? ["kugou" as const] : []),
+    ...(settings.value.useNetease ? ["netease" as const] : []),
+  ];
+}
+function providerEnabled(provider: ExternalProviderName) {
+  return provider === "amll" ? settings.value.useAmlldb : provider === "kugou" ? settings.value.useKugou : settings.value.useNetease;
+}
+function refreshDisplayLines() {
+  displayLines.value = lines.value.map((line) => settings.value.swapTranslationRomanization
+    ? { ...line, words: line.words.map((word) => ({ ...word })), translatedLyric: line.romanLyric, romanLyric: line.translatedLyric }
+    : line);
+}
+
+async function persistCache(key: string, entry: Omit<NonNullable<ReturnType<typeof lyricCache.get>>, "at">) {
+  if (!key) return;
+  lyricCache.set(key, { ...entry, at: Date.now() });
+  const entries = [...lyricCache.entries()].sort(([, a], [, b]) => b.at - a.at).slice(0, 80);
+  lyricCache.clear();
+  for (const [entryKey, value] of entries) lyricCache.set(entryKey, value);
+  await chrome.storage.local.set({ lyricCache: Object.fromEntries(entries) }).catch(() => {});
+}
+
+function seekToLine(event: { lineIndex: number }) {
+  const line = lines.value[event.lineIndex];
+  const slider = document.querySelector<HTMLInputElement>('[aria-label="播放进度"]');
+  if (!line || !slider) return;
+  const target = Math.max(0, (line.startTime - Number(settings.value.offset || 0)) / 1000);
+  const oldStep = slider.getAttribute("step") || "1";
+  const nativeSetter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
+  slider.setAttribute("step", "any");
+  nativeSetter?.call(slider, String(target));
+  slider.setAttribute("value", String(target));
+  slider.focus({ preventScroll: true });
+  slider.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, composed: true, pointerId: 1, pointerType: "mouse", isPrimary: true, buttons: 1 }));
+  slider.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, composed: true, buttons: 1 }));
+  slider.dispatchEvent(new Event("input", { bubbles: true, composed: true }));
+  slider.dispatchEvent(new Event("change", { bubbles: true, composed: true }));
+  slider.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, composed: true, buttons: 0 }));
+  slider.dispatchEvent(new PointerEvent("pointerup", { bubbles: true, composed: true, pointerId: 1, pointerType: "mouse", isPrimary: true, buttons: 0 }));
+  slider.setAttribute("step", oldStep);
+  currentTime.value = Math.round(target * 1000);
+  state.bridge = { currentTimeMs: currentTime.value, observedAt: performance.now(), playing: playing.value };
+  playerRef.value?.lyricPlayer?.value?.setCurrentTime(currentTime.value + Number(settings.value.offset || 0), true);
+  playerRef.value?.lyricPlayer?.value?.resetScroll?.();
+  startProgressLoop();
+}
+
+function updateAlignPosition(viewport: HTMLElement) {
+  const dialog = findFullscreenDialog(viewport);
+  const cover = dialog?.querySelector<HTMLImageElement>('img[src*="/music/api/v1/static/cover"]');
+  const viewportBox = viewport.getBoundingClientRect();
+  const coverBox = cover?.getBoundingClientRect();
+  if (!coverBox || viewportBox.height <= 0) return;
+  state.alignPosition = Math.max(0.1, Math.min(0.9, (coverBox.top + coverBox.height / 2 - viewportBox.top) / viewportBox.height));
+}
+
+function syncBackground(target?: HTMLElement | null) {
+  const dialog = findFullscreenDialog(target || findNativeLyrics());
+  if (!dialog) return;
+  const cover = dialog.querySelector<HTMLImageElement>('img[src*="/music/api/v1/static/cover"]');
+  const nativeBackground = dialog.children[0] as HTMLElement | undefined;
+  if (!nativeBackground) return;
+  let host: Node = nativeBackground.shadowRoot || nativeBackground;
+  if (!nativeBackground.shadowRoot) {
+    try { host = nativeBackground.attachShadow({ mode: "open" }); } catch { host = nativeBackground; }
+  }
+  nativeBackground.style.setProperty("background", "transparent", "important");
+  nativeBackground.style.setProperty("background-image", "none", "important");
+  const renderer = settings.value.backgroundRenderer === "pixi" ? "pixi" : "mesh";
+  if (!state.backgroundRoot || !state.background || state.backgroundRenderer !== renderer) {
+    state.background?.dispose();
+    state.backgroundRenderer = renderer;
+    state.backgroundRoot = document.createElement("div");
+    state.backgroundRoot.id = "fnmusic-amll-background";
+    state.backgroundRoot.style.cssText = "position:absolute;inset:0;overflow:hidden;pointer-events:none;background:transparent;";
+    state.background = createBackground(renderer);
+    const canvas = state.background.getElement();
+    canvas.style.cssText = "position:absolute;inset:0;width:100%;height:100%;min-width:0;min-height:0;z-index:0;";
+    const shade = document.createElement("div");
+    shade.style.cssText = "position:absolute;inset:0;pointer-events:none;background:linear-gradient(#0000 60%, #0000001a 100%);z-index:1;";
+    state.backgroundRoot.replaceChildren(canvas, shade);
+  }
+  if (state.backgroundRoot.parentNode !== host) host.appendChild(state.backgroundRoot);
+  state.backgroundHost = nativeBackground;
+  applyBackgroundSettings();
+  const source = cover?.currentSrc || cover?.src || "";
+  if (cover && source && source !== state.backgroundAlbum) {
+    state.backgroundAlbum = source;
+    void state.background?.setAlbum(source).catch(() => state.background?.setAlbum(cover)).catch(() => {});
+  }
+}
+
+function mount(target: HTMLElement) {
+  if (state.root) {
+    if (state.root.parentElement !== target) target.appendChild(state.root);
+    return;
+  }
+  state.root = document.createElement("div");
+  state.root.id = "fnmusic-amll-root";
+  target.appendChild(state.root);
+  state.app = createApp({ setup: () => () => h(LyricPlayer, {
+    ref: playerRef,
+    disabled: false,
+    playing: playing.value,
+    alignAnchor: "center",
+    alignPosition: state.alignPosition,
+    enableSpring: settings.value.spring,
+    enableBlur: settings.value.blur,
+    enableScale: settings.value.scale,
+    wordFadeWidth: Math.max(0.0001, Number(settings.value.wordFadeWidth) || 0.5),
+    lyricLines: displayLines.value,
+    currentTime: currentTime.value + Number(settings.value.offset || 0),
+    onLineClick: seekToLine,
+  }) });
+  state.app.mount(state.root);
+  applySettingsStyle();
+}
+
+function showOriginal() {
+  state.original?.style.removeProperty("display");
+  state.original = null;
+  state.root?.classList.remove("is-visible", "no-lyrics", "is-loading");
+}
+
+function claimAmll() {
+  const native = findNativeLyrics();
+  const viewport = findViewport(native);
+  if (!native || !viewport) return false;
+  syncBackground(native);
+  state.original = native;
+  mount(viewport);
+  native.style.setProperty("display", "none", "important");
+  state.root?.classList.add("is-visible", "is-loading", "no-lyrics");
+  return true;
+}
+
+function showAmll() {
+  const native = findNativeLyrics();
+  const viewport = findViewport(native);
+  if (!native || !viewport || !lines.value.length) return;
+  refreshDisplayLines();
+  syncBackground(native);
+  state.original = native;
+  mount(viewport);
+  native.style.setProperty("display", "none", "important");
+  state.root?.classList.add("is-visible");
+  state.root?.classList.remove("is-loading", "no-lyrics");
+}
+
+function applySettingsStyle() {
+  if (state.root) {
+    state.root.style.setProperty("--amll-lp-font-size", lyricSizePresets[settings.value.lyricSizePreset] || lyricSizePresets.medium);
+    state.root.style.setProperty("--amll-lp-font-family", settings.value.fontFamily || "Microsoft YaHei");
+    state.root.style.setProperty("--amll-lp-font-weight", String(Number(settings.value.fontWeight) || 600));
+    state.root.style.setProperty("--amll-lp-letter-spacing", settings.value.letterSpacing || "normal");
+    state.root.style.setProperty("--amll-translation-display", settings.value.showTranslation ? "block" : "none");
+    state.root.style.setProperty("--amll-roman-display", settings.value.showRomanization ? "block" : "none");
+  }
+  window.postMessage({ source: "fnmusic-amll-audio-config", fftFrom: Number(settings.value.fftFrom) || 80, fftTo: Number(settings.value.fftTo) || 2000 }, "*");
+  refreshDisplayLines();
+  applyBackgroundSettings();
+}
+
+function applyBackgroundSettings() {
+  if (!state.background) return;
+  state.background.setRenderScale(Math.max(0.01, Math.min(10, Number(settings.value.backgroundRenderScale) || 1)));
+  state.background.setFPS(Math.max(1, Math.min(1000, Math.round(Number(settings.value.backgroundFps) || 60))));
+  state.background.setStaticMode(!!settings.value.backgroundStaticMode);
+  state.background.setHasLyric(lines.value.length > 0);
+  state.background.setLowFreqVolume(state.lowFreqVolume);
+}
+
+function applyBackgroundPlayback(nextPlaying: boolean) {
+  if (!state.background || state.backgroundPlaying === nextPlaying) return;
+  state.backgroundPlaying = nextPlaying;
+  if (nextPlaying) state.background.resume();
+  else state.background.pause();
+}
+
+async function saveDebug(debug: DebugInfo) {
+  chrome.runtime.sendMessage({ type: "saveLyricDebug", debug }).catch(() => {});
+}
+
+function setDebug(source: Source, format: LyricFormat, status: string, raw: string, matched?: string, confidence?: number, durationMs?: number) {
+  void saveDebug({ source, format, status, matched, rawPreview: raw.slice(0, 1000), at: new Date().toISOString(), confidence, durationMs });
+}
+
+async function loadFeiniu(guid: string, payload?: unknown) {
+  if (payload !== undefined) {
+    const parsed = normalizeLyrics(payload);
+    if (parsed.length) return { lines: parsed, raw: linesToTtml(parsed), format: "ttml" as LyricFormat };
+  }
+  if (guid.startsWith("__title__") || guid.startsWith("title:")) return null;
+  try {
+    const response = await fetch(`/music/api/v1/lyric/list?trackGUID=${encodeURIComponent(guid)}`, { credentials: "include", signal: AbortSignal.timeout(SOURCE_TIMEOUT_MS) });
+    if (!response.ok) return null;
+    const body = await response.json();
+    const parsed = normalizeLyrics(body);
+    return parsed.length ? { lines: parsed, raw: linesToTtml(parsed), format: "ttml" as LyricFormat } : null;
+  } catch {
+    return null;
+  }
+}
+
+function parseProviderResult(result: ProviderResult): ParsedResult | null {
+  let parsed = parseLyricText(result.text, result.format);
+  if (result.translation) parsed = mergeTranslation(parsed, parseLyricText(result.translation, "lrc"));
+  if (result.romanization) parsed = mergeRomanization(parsed, parseLyricText(result.romanization, "lrc"));
+  if (!parsed.length) return null;
+  const wordByWord = parsed.some((line) => line.words.length > 1);
+  if (result.source === "amll" && !wordByWord) return null;
+  return {
+    source: result.source,
+    format: result.format,
+    lines: parsed,
+    raw: result.text,
+    matched: result.matched,
+    confidence: result.confidence ?? (result.qualified === false ? 0 : 100),
+    debug: result.debug,
+    qualified: result.qualified !== false,
+    matchReason: result.matchReason,
+  };
+}
+
+async function loadExternalProvider(song: Song, provider: ExternalProviderName) {
+  if (!settings.value.externalLyricsEnabled || !providerEnabled(provider)) return null;
+  try {
+    const response = await Promise.race([
+      chrome.runtime.sendMessage({ type: "fetchProviderLyrics", provider, title: song.title, artist: song.artist, durationMs: songDurationMs() }),
+      new Promise<null>((resolve) => window.setTimeout(() => resolve(null), SOURCE_TIMEOUT_MS)),
+    ]);
+    return response?.ok && typeof response.text === "string" ? response as ProviderResult : null;
+  } catch {
+    return null;
+  }
+}
+
+async function loadTrack(key: string, payload?: unknown) {
+  const token = ++state.loadToken;
+  if (key !== state.trackKey) {
+    state.bridge = null;
+    state.lastTime = -1;
+    currentTime.value = 0;
+  }
+  state.loadStarted = Date.now();
+  state.firstLyricAt = 0;
+  state.trackKey = key;
+  state.trackGUID = key.split("|")[0];
+  const song = readSong();
+  const durationMs = songDurationMs();
+  const cacheKey = normalizeSongKey({ title: song.title, artist: song.artist, durationMs });
+  state.trackCacheKey = cacheKey;
+  state.titleKey = `${song.title}|${document.querySelector<HTMLInputElement>('[aria-label="播放进度"]')?.max || ""}`;
+  lines.value = [];
+  displayLines.value = [];
+  claimAmll();
+  await cacheReady;
+  const cached = lyricCache.get(cacheKey) || lyricCache.get(key);
+  if (cached) {
+    if (token !== state.loadToken) return;
+    lines.value = cached.lines.map((line) => ({ ...line, words: line.words.map((word) => ({ ...word })) }));
+    state.firstLyricAt = Date.now() - state.loadStarted;
+    setDebug(cached.source, cached.format, "使用歌词缓存", cached.raw, cached.matched, cached.confidence, state.firstLyricAt);
+    showAmll();
+    return;
+  }
+
+  let selected: ParsedResult | null = null;
+  const commit = (result: ParsedResult) => {
+    if (token !== state.loadToken || !result.qualified || !result.lines.length) return;
+    const rank = PROVIDER_PRIORITY.indexOf(result.source);
+    if (selected) {
+      const selectedRank = PROVIDER_PRIORITY.indexOf(selected.source);
+      if (rank > selectedRank) return;
+      if (rank === selectedRank && (result.confidence || 0) <= (selected.confidence || 0)) return;
+    }
+    selected = result;
+    lines.value = result.lines;
+    if (!state.firstLyricAt) state.firstLyricAt = Date.now() - state.loadStarted;
+    void persistCache(cacheKey, { source: result.source, format: result.format, lines: result.lines, raw: result.raw, matched: result.matched, confidence: result.confidence });
+    setDebug(result.source, result.format, `${result.debug || "歌词成功"}；匹配度 ${result.confidence || 0}%`, result.raw, result.matched, result.confidence, Date.now() - state.loadStarted);
+    showAmll();
+  };
+
+  const externalTasks = enabledExternalProviders().map((provider) => loadExternalProvider(song, provider).then((raw) => {
+    const parsed = raw ? parseProviderResult(raw) : null;
+    if (parsed) commit(parsed);
+  }).catch(() => {}));
+
+  let nativeResult: ParsedResult | null = null;
+  const nativeTask = loadFeiniu(state.trackGUID, payload).then((native) => {
+    if (!native?.lines.length) return;
+    nativeResult = {
+      source: "feiniu",
+      format: native.format,
+      lines: native.lines,
+      raw: native.raw,
+      matched: song.title,
+      confidence: state.trackGUID.startsWith("__title__") ? 70 : 90,
+      qualified: true,
+      debug: "FnMusic 自带歌词",
+    };
+  }).catch(() => {});
+
+  await Promise.allSettled([...externalTasks, nativeTask]);
+  if (token !== state.loadToken) return;
+  if (!selected && nativeResult) commit(nativeResult);
+
+  if (!selected) {
+    const text = readNativeText();
+    const fallback = text ? parseLyricText(text, "text") : [];
+    if (fallback.length) {
+      lines.value = fallback;
+      await persistCache(cacheKey, { source: "feiniu", format: "ttml", lines: fallback, raw: linesToTtml(fallback) });
+      setDebug("feiniu", "ttml", `FnMusic 页面歌词转换为标准 TTML，优先级：${PROVIDER_PRIORITY.join("→")}`, linesToTtml(fallback), undefined, undefined, Date.now() - state.loadStarted);
+      showAmll();
+      return;
+    }
+    setDebug("none", "text", "无可用歌词", "");
+    showOriginal();
+  }
+}
+
+function syncTrack() {
+  if (!isFeiniuPlayer()) return;
+  const native = findNativeLyrics();
+  const viewport = findViewport(native);
+  if (!native || !viewport) return;
+  native.querySelectorAll<HTMLElement>(".music-player-karaoke-live-time").forEach((node) => node.style.setProperty("display", "none", "important"));
+  const song = readSong();
+  const key = trackKey(song);
+  if (state.root && viewport && state.root.parentElement !== viewport) viewport.appendChild(state.root);
+  updateAlignPosition(viewport);
+  syncBackground(native);
+  if (native && viewport && !state.root) claimAmll();
+  const currentTitleKey = `${song.title}|${document.querySelector<HTMLInputElement>('[aria-label="播放进度"]')?.max || ""}`;
+  if (key !== state.trackKey && !(state.titleKey === currentTitleKey && !state.trackGUID.startsWith("__title__"))) void loadTrack(key);
+  if (state.root?.classList.contains("is-visible") && native) native.style.setProperty("display", "none", "important");
+}
+
+function syncDisplayedProgress(now = performance.now()) {
+  const slider = document.querySelector<HTMLInputElement>('[aria-label="播放进度"]');
+  const value = Number(slider?.value);
+  const snapshot = resolvePlaybackClock({
+    now,
+    bridge: state.bridge,
+    fallback: { currentTimeMs: Number.isFinite(value) ? Math.round(value * 1000) : currentTime.value, playing: !!document.querySelector('[aria-label="暂停"]') },
+  });
+  const next = snapshot.currentTimeMs;
+  if (next !== state.lastTime) {
+    state.lastTime = next;
+    currentTime.value = next;
+  }
+  playing.value = snapshot.playing;
+  applyBackgroundPlayback(snapshot.playing);
+}
+
+function bindOffsetButtons() {
+  document.querySelectorAll<HTMLButtonElement>('[aria-label="歌词提前"], [aria-label="歌词延后"]').forEach((button) => {
+    if (button.dataset.amllBound) return;
+    button.dataset.amllBound = "1";
+    button.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      const delta = button.getAttribute("aria-label") === "歌词提前" ? 500 : -500;
+      settings.value.offset = Math.max(-5000, Math.min(5000, Number(settings.value.offset || 0) + delta));
+      chrome.storage.local.set({ offset: settings.value.offset }).catch(() => {});
+      applySettingsStyle();
+    }, true);
+  });
+}
+
+window.addEventListener("message", (event) => {
+  if (event.source !== window) return;
+  if (event.data?.source === "fnmusic-amll-playback") {
+    const currentTimeMs = Number(event.data.currentTimeMs);
+    if (!Number.isFinite(currentTimeMs)) return;
+    state.bridge = { currentTimeMs: Math.max(0, Math.round(currentTimeMs)), observedAt: performance.now(), playing: !!event.data.playing };
+    if (Number.isFinite(Number(event.data.lowFreqVolume))) {
+      state.lowFreqVolume = Math.max(0, Math.min(1, Number(event.data.lowFreqVolume)));
+      state.background?.setLowFreqVolume(state.lowFreqVolume);
+    }
+    syncDisplayedProgress();
+    if (playing.value) startProgressLoop();
+    return;
+  }
+  if (event.data?.source !== "fnmusic-amll" || !event.data.trackGUID) return;
+  const song = readSong();
+  const key = `${event.data.trackGUID}|${song.title}|${document.querySelector<HTMLInputElement>('[aria-label="播放进度"]')?.max || ""}`;
+  if (key === state.trackKey && (lines.value.length > 0 || Date.now() - state.loadStarted < 3000)) return;
+  void loadTrack(key, event.data.payload);
+});
+
+let observerTimer = 0;
+const observer = new MutationObserver(() => {
+  if (isFeiniuPlayer() && !state.root) claimAmll();
+  if (observerTimer) return;
+  observerTimer = window.setTimeout(() => { observerTimer = 0; bindOffsetButtons(); syncBackground(); syncTrack(); }, 160);
+});
+observer.observe(document.documentElement, { childList: true, subtree: true });
+
+bindWheelScroll(() => state.root, () => playerRef.value?.lyricPlayer?.value as AmllPlayerLike | undefined);
+chrome.runtime.sendMessage({ type: "getSettings" }).then((saved) => { if (saved) Object.assign(settings.value, saved); applySettingsStyle(); }).catch(() => {});
+
+chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+  if (message?.type === "settingsUpdated") {
+    const before = JSON.stringify({ external: settings.value.externalLyricsEnabled, amll: settings.value.useAmlldb, kugou: settings.value.useKugou, netease: settings.value.useNetease });
+    Object.assign(settings.value, message.settings || {});
+    applySettingsStyle();
+    const after = JSON.stringify({ external: settings.value.externalLyricsEnabled, amll: settings.value.useAmlldb, kugou: settings.value.useKugou, netease: settings.value.useNetease });
+    if (before !== after) {
+      state.trackKey = "";
+      const song = readSong();
+      const slider = document.querySelector<HTMLInputElement>('[aria-label="播放进度"]');
+      void loadTrack(`${state.trackGUID && !state.trackGUID.startsWith("__title__") ? state.trackGUID : song.guid}|${song.title}|${slider?.max || ""}`);
+    }
+    sendResponse({ ok: true });
+    return;
+  }
+  if (message?.type === "refreshLyrics") {
+    state.trackKey = "";
+    const song = readSong();
+    const slider = document.querySelector<HTMLInputElement>('[aria-label="播放进度"]');
+    void loadTrack(`${state.trackGUID && !state.trackGUID.startsWith("__title__") ? state.trackGUID : song.guid}|${song.title}|${slider?.max || ""}`);
+    sendResponse({ ok: true });
+    return;
+  }
+  if (message?.type === "clearLyricCache") {
+    lyricCache.clear();
+    sendResponse({ ok: true });
+    return;
+  }
+  if (message?.type === "getSongInfo") {
+    const song = readSong();
+    sendResponse({ ...song, durationMs: songDurationMs() });
+    return;
+  }
+  if (message?.type === "applyManualLyrics") {
+    const payload = message.payload || {};
+    const parsed = parseLyricText(String(payload.text || ""), payload.format);
+    if (!parsed.length) { sendResponse({ ok: false }); return; }
+    void (async () => {
+      state.loadToken += 1;
+      lines.value = payload.translation ? mergeTranslation(parsed, parseLyricText(payload.translation, "lrc")) : parsed;
+      if (payload.romanization) lines.value = mergeRomanization(lines.value, parseLyricText(payload.romanization, "lrc"));
+      const cacheKey = state.trackCacheKey || state.trackKey;
+      await persistCache(cacheKey, { source: payload.source || "none", format: payload.format || "lrc", lines: lines.value, raw: linesToTtml(lines.value), matched: payload.matched, confidence: payload.confidence });
+      setDebug(payload.source || "none", payload.format || "text", payload.debug || "手动歌词", linesToTtml(lines.value), payload.matched, payload.confidence);
+      showAmll();
+      sendResponse({ ok: true });
+    })().catch(() => sendResponse({ ok: false }));
+    return true;
+  }
+  return;
+});
+
+syncTrack();
+bindOffsetButtons();
+const frame = (now: number) => {
+  syncDisplayedProgress(now);
+  state.raf = playing.value ? requestAnimationFrame(frame) : 0;
+};
+function startProgressLoop() {
+  if (!state.raf) state.raf = requestAnimationFrame(frame);
+}
+syncDisplayedProgress();
+if (playing.value) startProgressLoop();
+setInterval(() => {
+  bindOffsetButtons();
+  syncBackground();
+  syncTrack();
+  syncDisplayedProgress();
+  if (playing.value) startProgressLoop();
+  if (!playing.value && state.raf) { cancelAnimationFrame(state.raf); state.raf = 0; }
+}, 800);

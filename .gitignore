@@ -1,0 +1,17 @@
+node_modules/
+dist/
+*.tgz
+.page-assets/
+_tmp/
+*.zip
+*.crx
+*.pem
+*.key
+*.p12
+*.pfx
+.env
+.env.*
+credentials.*
+secrets.*
+.DS_Store
+Thumbs.db

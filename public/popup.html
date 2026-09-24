@@ -1,0 +1,128 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>FnMusic AMLL lyrics 设置</title>
+  <style>
+    :root { color-scheme: dark; }
+    * { box-sizing: border-box; }
+    body { margin: 0; width: 560px; min-height: 620px; background: #17131d; color: #f8f6fb; font: 13px/1.45 "Microsoft YaHei", "PingFang SC", "Noto Sans CJK SC", system-ui, sans-serif; }
+    a { color: #a88bff; }
+    .shell { display: grid; grid-template-columns: 142px 1fr; min-height: 620px; }
+    aside { padding: 16px 10px; background: #211b28; border-right: 1px solid #3a3044; }
+    .brand { padding: 0 8px 18px; font-size: 15px; font-weight: 700; line-height: 1.25; }
+    .brand small { display: block; margin-top: 2px; color: #a89caf; font-size: 11px; font-weight: 400; }
+    nav { display: grid; gap: 4px; }
+    nav button { width: 100%; border: 0; border-radius: 6px; padding: 9px 10px; background: transparent; color: #bcb1c4; text-align: left; cursor: pointer; }
+    nav button:hover { background: #30263a; color: #fff; }
+    nav button[aria-selected="true"] { background: #6e4ed3; color: #fff; }
+    main { min-width: 0; padding: 18px; }
+    .page { display: none; }
+    .page.active { display: block; }
+    h1 { margin: 0 0 4px; font-size: 20px; }
+    .page-intro { margin: 0 0 16px; color: #a89caf; font-size: 12px; }
+    h2 { margin: 18px 0 8px; font-size: 13px; color: #eee7f3; }
+    .setting { display: flex; align-items: center; justify-content: space-between; gap: 14px; min-height: 54px; padding: 10px 0; border-bottom: 1px solid #302737; }
+    .setting:last-child { border-bottom: 0; }
+    .setting-copy { min-width: 0; }
+    .setting-label { color: #f4eff7; }
+    .setting-desc { margin-top: 2px; color: #9d91a6; font-size: 11px; line-height: 1.35; }
+    input[type=text], input[type=number], select { width: 150px; min-width: 0; border: 1px solid #554966; border-radius: 5px; padding: 7px 8px; background: #241d2d; color: #fff; }
+    input[type=range] { width: 128px; accent-color: #8b6cf0; }
+    input[type=checkbox] { width: 17px; height: 17px; accent-color: #8b6cf0; }
+    .range-control { display: flex; align-items: center; gap: 7px; }
+    .range-control input[type=number] { width: 62px; }
+    button.action { border: 0; border-radius: 5px; padding: 8px 11px; background: #7656df; color: #fff; cursor: pointer; }
+    button.action.secondary { background: #3a3045; }
+    .actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+    .provider-row { display: flex; align-items: center; gap: 10px; margin: 8px 0; }
+    .provider-row select { flex: 1; }
+    .provider-option[hidden], .provider-row[hidden] { display: none; }
+    #manualResults { width: 100%; min-height: 110px; margin-top: 10px; }
+    #debug { max-height: 240px; overflow: auto; margin: 12px 0 0; color: #cfc1d8; white-space: pre-wrap; word-break: break-word; }
+    .hint { margin-top: 14px; color: #978b9f; font-size: 11px; }
+    .about-block { margin: 0 0 12px; color: #cdc2d5; line-height: 1.6; }
+    .about-block strong { color: #fff; }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <aside>
+      <div class="brand">FnMusic AMLL lyrics<small>飞牛音乐扩展</small></div>
+      <nav aria-label="设置分类">
+        <button type="button" data-page="content" aria-selected="true">歌词内容</button>
+        <button type="button" data-page="appearance" aria-selected="false">歌词样式</button>
+        <button type="button" data-page="background" aria-selected="false">歌词背景</button>
+        <button type="button" data-page="sources" aria-selected="false">歌词来源</button>
+        <button type="button" data-page="tools" aria-selected="false">工具</button>
+        <button type="button" data-page="about" aria-selected="false">关于</button>
+      </nav>
+    </aside>
+    <main>
+      <section class="page active" data-page="content">
+        <h1>歌词内容</h1><p class="page-intro">控制翻译、音译和间奏歌词的显示方式。</p>
+        <div class="setting"><div class="setting-copy"><div class="setting-label">显示翻译歌词</div></div><input id="showTranslation" type="checkbox" checked></div>
+        <div class="setting"><div class="setting-copy"><div class="setting-label">显示音译歌词</div></div><input id="showRomanization" type="checkbox" checked></div>
+        <div class="setting"><div class="setting-copy"><div class="setting-label">交换翻译与音译</div><div class="setting-desc">仅在两种附加歌词都存在时生效。</div></div><input id="swapTranslationRomanization" type="checkbox"></div>
+        <div class="setting"><div class="setting-copy"><div class="setting-label">歌词偏移</div><div class="setting-desc">单位为毫秒，正数让歌词更晚出现。</div></div><input id="offset" type="number" min="-5000" max="5000" step="50" value="0"></div>
+        <div class="actions"><button class="action" id="refreshLyrics" type="button">刷新当前歌词</button></div>
+      </section>
+      <section class="page" data-page="appearance">
+        <h1>歌词样式</h1><p class="page-intro">这些选项对应官方 AMLL 播放器的歌词渲染配置。</p>
+        <h2>字体</h2>
+        <div class="setting"><div class="setting-copy"><div class="setting-label">字体家族</div><div class="setting-desc">默认使用系统黑体，可自行填写已安装字体。</div></div><input id="fontFamily" type="text" value="Microsoft YaHei"></div>
+        <div class="setting"><div class="setting-copy"><div class="setting-label">字体大小</div><div class="setting-desc">以所选字号为基准，跟随浏览器页面缩放。</div></div><select id="lyricSizePreset"><option value="tiny">超小</option><option value="extra-small">极小</option><option value="small">小</option><option value="medium" selected>中</option><option value="large">大</option><option value="extra-large">极大</option><option value="huge">超大</option></select></div>
+        <div class="setting"><div class="setting-copy"><div class="setting-label">字体字重</div><div class="setting-desc">官方默认值为 600。</div></div><div class="range-control"><input id="fontWeightRange" type="range" min="100" max="900" step="50" value="600"><input id="fontWeight" type="number" min="100" max="900" step="50" value="600"></div></div>
+        <div class="setting"><div class="setting-copy"><div class="setting-label">字符间距</div></div><input id="letterSpacing" type="text" value="normal"></div>
+        <h2>动画</h2>
+        <div class="setting"><div class="setting-copy"><div class="setting-label">歌词行模糊效果</div><div class="setting-desc">官方默认开启，性能影响较高。</div></div><input id="blur" type="checkbox" checked></div>
+        <div class="setting"><div class="setting-copy"><div class="setting-label">歌词行缩放效果</div></div><input id="scale" type="checkbox" checked></div>
+        <div class="setting"><div class="setting-copy"><div class="setting-label">歌词行弹簧动画</div><div class="setting-desc">使用物理弹簧算法平滑滚动。</div></div><input id="spring" type="checkbox" checked></div>
+        <div class="setting"><div class="setting-copy"><div class="setting-label">逐词渐变宽度</div><div class="setting-desc">官方默认 0.5，设置为 1 更接近 Android。</div></div><input id="wordFadeWidth" type="number" min="0.0001" max="2" step="0.1" value="0.5"></div>
+      </section>
+
+      <section class="page" data-page="background">
+        <h1>歌词背景</h1><p class="page-intro">背景直接替换 FnMusic 全屏页的原背景，不再叠加在歌词前面。</p>
+        <div class="setting"><div class="setting-copy"><div class="setting-label">背景渲染器</div></div><select id="backgroundRenderer"><option value="mesh">网格渐变渲染器</option><option value="pixi">PixiJS 渲染器</option></select></div>
+        <div class="setting"><div class="setting-copy"><div class="setting-label">背景最高帧率</div><div class="setting-desc">官方默认 60。</div></div><input id="backgroundFps" type="number" min="1" max="1000" step="1" value="60"></div>
+        <div class="setting"><div class="setting-copy"><div class="setting-label">背景渲染倍率</div><div class="setting-desc">官方默认 1，即每像素点渲染。</div></div><input id="backgroundRenderScale" type="number" min="0.01" max="10" step="0.01" value="1"></div>
+        <div class="setting"><div class="setting-copy"><div class="setting-label">背景静态模式</div><div class="setting-desc">开启后会禁用动画和音频跳动。</div></div><input id="backgroundStaticMode" type="checkbox"></div>
+        <div class="setting"><div class="setting-copy"><div class="setting-label">音频可视化频域</div><div class="setting-desc">默认 80–2000 Hz，低频部分驱动背景跳动。</div></div><div class="range-control"><input id="fftFrom" type="number" min="1" max="22050" step="1" value="80"><input id="fftTo" type="number" min="1" max="22050" step="1" value="2000"></div></div>
+      </section>
+      <section class="page" data-page="sources">
+        <h1>歌词来源</h1><p class="page-intro">固定优先级：AMLL 逐字歌词 → 酷狗逐字歌词 → 网易云逐行歌词 → FnMusic 自带歌词。</p>
+        <div class="setting"><div class="setting-copy"><div class="setting-label">启用外部歌词源</div><div class="setting-desc">关闭后只使用 FnMusic 自带歌词。</div></div><input id="externalLyricsEnabled" type="checkbox" checked></div>
+        <div class="setting provider-option" data-provider="amll"><div class="setting-copy"><div class="setting-label">AMLL 官方歌词库</div><div class="setting-desc">优先获取逐字 TTML 歌词。</div></div><input id="useAmlldb" type="checkbox" checked></div>
+        <div class="setting provider-option" data-provider="kugou"><div class="setting-copy"><div class="setting-label">酷狗音乐</div><div class="setting-desc">KRC 逐字歌词，匹配通过后使用。</div></div><input id="useKugou" type="checkbox" checked></div>
+        <div class="setting provider-option" data-provider="netease"><div class="setting-copy"><div class="setting-label">网易云音乐</div><div class="setting-desc">LRC 逐行歌词，酷狗匹配失败时回退。</div></div><input id="useNetease" type="checkbox" checked></div>
+      </section>
+
+      <section class="page" data-page="tools">
+        <h1>工具</h1><p class="page-intro">手动检索、应用歌词和清理缓存。</p>
+        <div class="setting"><div class="setting-copy"><div class="setting-label">缓存管理</div><div id="cacheStats" class="setting-desc">正在读取缓存…</div></div><button class="action secondary" id="clearCache" type="button">清空缓存</button></div>
+        <h2>手动搜索歌词</h2>
+        <div class="setting"><div class="setting-copy"><div class="setting-label">来源</div></div><select id="manualSource"><option value="amll">AMLL 词库</option><option value="kugou">酷狗音乐</option><option value="netease">网易云音乐</option></select></div>
+        <div class="setting"><div class="setting-copy"><div class="setting-label">关键词</div></div><input id="manualQuery" type="text" placeholder="留空使用当前歌曲"></div>
+        <div class="actions"><button class="action" id="manualSearch" type="button">搜索歌词</button><button class="action secondary" id="manualApply" type="button">应用选中歌词</button></div>
+        <select id="manualResults" size="5"></select><div id="manualStatus" class="hint"></div>
+        <h2>调试信息</h2>
+        <div class="setting"><div class="setting-copy"><div class="setting-label">显示调试信息</div></div><input id="showDebug" type="checkbox"></div>
+        <pre id="debug" hidden>暂无歌词请求记录</pre>
+      </section>
+
+      <section class="page" data-page="about">
+        <h1>关于 FnMusic AMLL lyrics</h1>
+        <p class="about-block"><strong>开发者：</strong>其核（<a href="https://github.com/qihe114514" target="_blank" rel="noreferrer">GitHub</a> · <a href="https://space.bilibili.com/1049283248" target="_blank" rel="noreferrer">B站</a> · <a href="https://www.douyin.com/user/MS4wLjABAAAAuUtKOArTFKTBm4C6o5MwDQuGMNZ9-0CWZfUay6U9wUI" target="_blank" rel="noreferrer">抖音</a>）</p>
+        <p class="about-block"><strong>开源仓库：</strong><a href="https://github.com/qihe114514/FnMusic-AMLL-lyrics" target="_blank" rel="noreferrer">https://github.com/qihe114514/FnMusic-AMLL-lyrics</a></p>
+        <p class="about-block"><strong>当前版本：</strong><span id="aboutVersion">1.0.0</span></p>
+        <p class="about-block"><strong>功能简介：</strong>将官方 AMLL 歌词播放器嵌入 FnMusic 播放页，支持逐字/逐行歌词、翻译、音译、背景渲染与自动跟随滚动；歌词来源优先级为 AMLL → 酷狗 → 网易云 → FnMusic 自带。</p>
+        <p class="about-block"><strong>匹配规则：</strong>标题相似度 ≥ 75%；双方时长差 ≤ 5 秒；歌手允许顺序不同、数量相差 1–2 位；综合相似度 ≥ 75% 才视为命中。</p>
+        <p class="about-block"><strong>致谢：</strong>Apple Music-like Lyrics（AGPL-3.0-only）、Vue、Pako、酷狗/网易云公开接口以及所有歌词贡献者。</p>
+        <p class="about-block"><strong>免责声明：</strong>本项目仅供学习与个人使用；歌词版权归各音乐平台及原作者所有。插件不存储、不分发歌词文件，第三方接口可能随时失效或被调整。</p>
+      </section>
+    </main>
+  </div>
+  <script src="popup.js"></script>
+</body>
+</html>
