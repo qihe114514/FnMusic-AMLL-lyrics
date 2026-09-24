@@ -310,29 +310,47 @@ function syncBackground(target?: HTMLElement | null) {
   const cover = dialog.querySelector<HTMLImageElement>('img[src*="/music/api/v1/static/cover"]');
   const nativeBackground = dialog.children[0] as HTMLElement | undefined;
   if (!nativeBackground) return;
-  let host: Node = nativeBackground.shadowRoot || nativeBackground;
-  if (!nativeBackground.shadowRoot) {
-    try { host = nativeBackground.attachShadow({ mode: "open" }); } catch { host = nativeBackground; }
+  const source = cover?.currentSrc || cover?.src || "";
+
+  // 还没有专辑图时不要接管原生背景，否则启动页会变成黑色。
+  // 如果已经成功接管过背景，则保留旧背景，等新专辑图到达后再切换，避免切歌瞬间闪黑。
+  if (!source) {
+    if (!state.background) {
+      state.backgroundRoot?.remove();
+      state.backgroundRoot = null;
+      state.backgroundAlbum = "";
+      state.backgroundFallback = true;
+      nativeBackground.style.removeProperty("background");
+      nativeBackground.style.removeProperty("background-image");
+      applyBackgroundVisibility();
+    }
+    return;
   }
+
   const renderer = settings.value.backgroundRenderer === "pixi" ? "pixi" : "mesh";
   try {
     if (!state.backgroundRoot || !state.background || state.backgroundRenderer !== renderer) {
       state.background?.dispose();
+      state.backgroundRoot?.remove();
       state.backgroundRenderer = renderer;
+      const nextBackground = createBackground(renderer);
+      if (!nextBackground) {
+        state.backgroundRoot = null;
+        state.background = null;
+        state.backgroundFallback = true;
+        applyBackgroundVisibility();
+        return;
+      }
+      state.background = nextBackground;
       state.backgroundRoot = document.createElement("div");
       state.backgroundRoot.id = "fnmusic-amll-background";
       state.backgroundRoot.style.cssText = "position:absolute;inset:0;overflow:hidden;pointer-events:none;background:transparent;";
-      state.background = createBackground(renderer);
-      if (!state.background) {
-        state.backgroundRoot.remove();
-        state.backgroundRoot = null;
-        return;
-      }
-      const canvas = state.background.getElement();
+      const canvas = nextBackground.getElement();
       canvas.style.cssText = "position:absolute;inset:0;width:100%;height:100%;min-width:0;min-height:0;z-index:0;";
       const shade = document.createElement("div");
-      shade.style.cssText = "position:absolute;inset:0;pointer-events:none;background:radial-gradient(circle at 50% 42%, rgba(0,0,0,.12) 0%, rgba(0,0,0,.34) 72%, rgba(0,0,0,.52) 100%);z-index:1;";
+      shade.style.cssText = "position:absolute;inset:0;pointer-events:none;background:radial-gradient(circle at 50% 42%, rgba(0,0,0,.18) 0%, rgba(0,0,0,.4) 72%, rgba(0,0,0,.55) 100%);z-index:1;";
       state.backgroundRoot.replaceChildren(canvas, shade);
+      state.backgroundAlbum = "";
     }
   } catch (error) {
     console.warn("[FnMusic AMLL] 背景渲染器不可用，保留 FnMusic 原生背景：", error);
@@ -340,6 +358,8 @@ function syncBackground(target?: HTMLElement | null) {
     state.backgroundRoot = null;
     state.background = null;
     state.backgroundFallback = true;
+    nativeBackground.style.removeProperty("background");
+    nativeBackground.style.removeProperty("background-image");
     applyBackgroundVisibility();
     return;
   }
@@ -348,6 +368,12 @@ function syncBackground(target?: HTMLElement | null) {
     applyBackgroundVisibility();
     return;
   }
+
+  // 只有背景渲染器成功创建后才接管原生背景层。
+  let host: Node = nativeBackground.shadowRoot || nativeBackground;
+  if (!nativeBackground.shadowRoot) {
+    try { host = nativeBackground.attachShadow({ mode: "open" }); } catch { host = nativeBackground; }
+  }
   state.backgroundFallback = false;
   applyBackgroundVisibility();
   nativeBackground.style.setProperty("background", "transparent", "important");
@@ -355,10 +381,9 @@ function syncBackground(target?: HTMLElement | null) {
   if (state.backgroundRoot.parentNode !== host) host.appendChild(state.backgroundRoot);
   state.backgroundHost = nativeBackground;
   applyBackgroundSettings();
-  const source = cover?.currentSrc || cover?.src || "";
-  if (cover && source && source !== state.backgroundAlbum) {
+  if (source !== state.backgroundAlbum) {
     state.backgroundAlbum = source;
-    void state.background?.setAlbum(source).catch(() => state.background?.setAlbum(cover)).catch(() => {});
+    void state.background.setAlbum(source).catch(() => cover ? state.background?.setAlbum(cover) : undefined).catch(() => {});
   }
 }
 
@@ -399,11 +424,14 @@ function claimAmll() {
   const native = findNativeLyrics();
   const host = findMountHost(native);
   if (!native || !host) return false;
+  const firstMount = !state.root;
   try { syncBackground(native); } catch (error) { console.warn("[FnMusic AMLL] 背景初始化异常，继续加载歌词：", error); }
   state.original = native;
   mount(host);
   native.style.setProperty("display", "none", "important");
-  state.root?.classList.add("is-visible", "is-loading", "no-lyrics");
+  if (firstMount) state.root?.classList.add("is-visible", "is-loading", "no-lyrics");
+  else state.root?.classList.add("is-visible");
+  if (lines.value.length) showAmll();
   return true;
 }
 
@@ -751,7 +779,10 @@ function syncTrack() {
   const currentTitleKey = `${song.title}|${document.querySelector<HTMLInputElement>('[aria-label="播放进度"]')?.max || ""}`;
   if (key !== state.trackKey && !(state.titleKey === currentTitleKey && !state.trackGUID.startsWith("__title__"))) void loadTrack(key);
   if (state.root?.classList.contains("is-visible")) {
-    if (lines.value.length) ensureLyricsVisible();
+    if (lines.value.length) {
+      if (state.root.classList.contains("is-loading") || state.root.classList.contains("no-lyrics")) showAmll();
+      else ensureLyricsVisible();
+    }
     native.style.setProperty("display", "none", "important");
   }
 }
