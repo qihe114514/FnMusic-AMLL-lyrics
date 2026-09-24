@@ -29,7 +29,7 @@ const createBackground = (renderer: string) => {
     return null;
   }
 };
-const state = { trackKey: "", trackGUID: "", titleKey: "", trackCacheKey: "", currentTrack: null as { guid: string; title?: string; artist?: string; durationMs?: number } | null, root: null as HTMLElement | null, app: null as ReturnType<typeof createApp> | null, backgroundRoot: null as HTMLElement | null, backgroundHost: null as HTMLElement | null, background: null as BackgroundInstance | null, backgroundRenderer: "mesh", backgroundPlaying: true, backgroundAlbum: "", backgroundFallback: false, original: null as HTMLElement | null, loadToken: 0, lastTime: -1, loadStarted: 0, firstLyricAt: 0, raf: 0, bridge: null as PlaybackAnchor | null, lowFreqVolume: 1, alignPosition: 0.3 };
+const state = { trackKey: "", trackGUID: "", titleKey: "", trackCacheKey: "", currentTrack: null as { guid: string; title?: string; artist?: string; durationMs?: number } | null, root: null as HTMLElement | null, app: null as ReturnType<typeof createApp> | null, backgroundRoot: null as HTMLElement | null, backgroundHost: null as HTMLElement | null, background: null as BackgroundInstance | null, backgroundRenderer: "mesh", backgroundPlaying: true, backgroundAlbum: "", backgroundFallback: false, original: null as HTMLElement | null, loadingKey: "", loadToken: 0, lastTime: -1, loadStarted: 0, firstLyricAt: 0, raf: 0, bridge: null as PlaybackAnchor | null, lowFreqVolume: 1, alignPosition: 0.3 };
 const LYRIC_CACHE_VERSION = 2;
 const lyricCache = new Map<string, { source: Source; format: LyricFormat; lines: LyricLine[]; raw: string; matched?: string; confidence?: number; at: number; v?: number; fallback?: boolean }>();
 const lyricSizePresets: Record<string, string> = { tiny: "14px", "extra-small": "16px", small: "18px", medium: "22px", large: "26px", "extra-large": "30px", huge: "36px" };
@@ -409,6 +409,7 @@ async function loadExternalProvider(song: Song, provider: ExternalProviderName) 
 async function loadAmlldbDirect(song: Song): Promise<ProviderResult | null> {
   try {
     const params = new URLSearchParams({ musicName: song.title, page: "1", pageSize: "10" });
+    if (song.artist) params.set("artistName", song.artist);
     const search = await fetch(`https://api.amll.dev/v1/lyrics/search?${params}`, { signal: AbortSignal.timeout(SOURCE_TIMEOUT_MS) }).then((response) => response.json());
     const items = Array.isArray(search?.data?.items) ? search.data.items : [];
     const candidates = items.map((item: any) => ({
@@ -443,6 +444,9 @@ async function loadAmlldbDirect(song: Song): Promise<ProviderResult | null> {
 }
 
 async function loadTrack(key: string, payload?: unknown) {
+  if (key === state.loadingKey) return;
+  if (key === state.trackKey && !lines.value.length && Date.now() - state.loadStarted < 4000) return;
+  state.loadingKey = key;
   const token = ++state.loadToken;
   if (key !== state.trackKey) {
     state.bridge = null;
@@ -559,6 +563,7 @@ async function loadTrack(key: string, payload?: unknown) {
     if (!(await fallbackToNative())) showOriginal();
   } finally {
     if (watchdog) window.clearTimeout(watchdog);
+    if (state.loadingKey === key) state.loadingKey = "";
   }
 }
 

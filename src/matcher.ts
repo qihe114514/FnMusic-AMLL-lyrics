@@ -120,6 +120,10 @@ export function durationDifference(requestedDurationMs?: number, candidateDurati
   return Math.abs(requested - candidate);
 }
 
+function isInstrumentalMark(value?: string | null) {
+  return /伴奏|纯音乐|instrumental|offs*vocal|karaoke/i.test(String(value || ""));
+}
+
 export function evaluateMatch(input: MatchInput, candidate: MatchCandidate): MatchResult {
   const titleScore = similarity(input.title, candidate.title);
   const durationDiff = durationDifference(input.durationMs, candidate.durationMs);
@@ -136,13 +140,15 @@ export function evaluateMatch(input: MatchInput, candidate: MatchCandidate): Mat
   const weightTotal = dimensions.reduce((total, [, weight]) => total + weight, 0);
   const combined = weightTotal > 0 ? dimensions.reduce((total, [value, weight]) => total + value * weight, 0) / weightTotal : 0;
 
-  const titlePass = titleScore >= MATCH_THRESHOLDS.title;
+  const versionMismatch = isInstrumentalMark(input.title) !== isInstrumentalMark(candidate.title);
+  const titlePass = titleScore >= MATCH_THRESHOLDS.title && !versionMismatch;
   const artistPass = artist.pass;
   const qualified = titlePass && durationPass && artistPass && combined >= MATCH_THRESHOLDS.combined;
   const reason = qualified
     ? "匹配通过"
     : [
-        !titlePass ? `标题相似度 ${(titleScore * 100).toFixed(1)}% 低于 ${MATCH_THRESHOLDS.title * 100}%` : "",
+        versionMismatch ? "标题版本不一致（伴奏/纯音乐与原曲）" : "",
+        !titlePass && !versionMismatch ? `标题相似度 ${(titleScore * 100).toFixed(1)}% 低于 ${MATCH_THRESHOLDS.title * 100}%` : "",
         !durationPass ? `时长差 ${Math.round((durationDiff || 0) / 1000)}s 超过 ${MATCH_THRESHOLDS.durationToleranceMs / 1000}s` : "",
         !artistPass ? "歌手数量或名称差异过大" : "",
         combined < MATCH_THRESHOLDS.combined ? `综合相似度 ${(combined * 100).toFixed(1)}% 低于 ${MATCH_THRESHOLDS.combined * 100}%` : "",
