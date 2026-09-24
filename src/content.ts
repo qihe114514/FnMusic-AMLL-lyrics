@@ -472,10 +472,6 @@ async function loadTrack(key: string, payload?: unknown) {
     const fallback = readNativeLyrics();
     if (!fallback.length) return false;
     lines.value = fallback;
-    const existing = lyricCache.get(cacheKey);
-    if (!existing || existing.source === "feiniu") {
-      await persistCache(cacheKey, { source: "feiniu", format: "ttml", lines: fallback, raw: linesToTtml(fallback), fallback: true });
-    }
     setDebug("feiniu", "ttml", "FnMusic 自带歌词", linesToTtml(fallback), undefined, undefined, Date.now() - state.loadStarted);
     showAmll();
     return true;
@@ -512,7 +508,9 @@ async function loadTrack(key: string, payload?: unknown) {
       selected = result;
       lines.value = result.lines;
       if (!state.firstLyricAt) state.firstLyricAt = Date.now() - state.loadStarted;
-      void persistCache(cacheKey, { source: result.source, format: result.format, lines: result.lines, raw: result.raw, matched: result.matched, confidence: result.confidence, fallback: result.fallback === true });
+      if (result.source !== "feiniu" && result.fallback !== true) {
+      void persistCache(cacheKey, { source: result.source, format: result.format, lines: result.lines, raw: result.raw, matched: result.matched, confidence: result.confidence, fallback: false });
+    }
       setDebug(result.source, result.format, `${result.debug || "歌词成功"}；匹配度 ${result.confidence || 0}%`, result.raw, result.matched, result.confidence, Date.now() - state.loadStarted);
       showAmll();
     };

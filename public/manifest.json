@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "FnMusic AMLL lyrics",
   "short_name": "FnMusic AMLL",
-  "version": "1.0.7",
+  "version": "1.0.8",
   "description": "在 FnMusic（飞牛音乐）中使用 Apple Music 风格歌词。",
   "permissions": [
     "storage",
