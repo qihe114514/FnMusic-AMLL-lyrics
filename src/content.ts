@@ -401,7 +401,7 @@ async function loadAmlldbDirect(song: Song): Promise<ProviderResult | null> {
       item,
       title: item.musicNames?.[0] || "",
       artist: item.artistNames?.join(" / ") || "",
-      match: evaluateMatch({ title: song.title, artist: undefined, durationMs: songDurationMs() }, { title: item.musicNames?.[0] || "", artist: item.artistNames?.join(" / ") || "" }),
+      match: evaluateMatch({ title: song.title, artist: song.artist, durationMs: songDurationMs() }, { title: item.musicNames?.[0] || "", artist: item.artistNames?.join(" / ") || "" }),
     })).filter((entry: any) => entry.match.qualified).slice(0, 3);
     const results = await Promise.all(candidates.map(async (entry: any) => {
       try {
