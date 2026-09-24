@@ -24,7 +24,26 @@ const playing = ref(false);
 const settings = ref<Settings>({ ...DEFAULT_SETTINGS });
 const playerRef = shallowRef<any>(null);
 type BackgroundInstance = { setRenderScale(scale: number): void; setFPS(fps: number): void; setStaticMode(enable: boolean): void; setLowFreqVolume(volume: number): void; setHasLyric(hasLyric: boolean): void; setAlbum(album: string | HTMLImageElement): Promise<void>; pause(): void; resume(): void; getElement(): HTMLElement; dispose(): void };
+let webglFloatSupport: boolean | null = null;
+
+function supportsFloatRenderTarget() {
+  if (webglFloatSupport !== null) return webglFloatSupport;
+  try {
+    const canvas = document.createElement("canvas");
+    const gl = canvas.getContext("webgl2", { alpha: true, antialias: false, depth: false, stencil: false, premultipliedAlpha: false });
+    webglFloatSupport = !!gl?.getExtension("EXT_color_buffer_float");
+    gl?.getExtension("WEBGL_lose_context")?.loseContext();
+  } catch {
+    webglFloatSupport = false;
+  }
+  return webglFloatSupport;
+}
+
 const createBackground = (renderer: string) => {
+  if (!supportsFloatRenderTarget()) {
+    console.warn("[FnMusic AMLL] 当前浏览器不支持 EXT_color_buffer_float，已跳过 AMLL 背景渲染。");
+    return null;
+  }
   try {
     return CoreBackgroundRender.new((renderer === "pixi" ? PixiRenderer : MeshGradientRenderer) as typeof MeshGradientRenderer) as BackgroundInstance;
   } catch (error) {
