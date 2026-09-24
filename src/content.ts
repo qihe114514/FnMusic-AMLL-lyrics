@@ -6,13 +6,13 @@ import "./style.css";
 import { resolvePlaybackClock, type PlaybackAnchor } from "./playback-clock";
 import { linesToTtml, mergeRomanization, mergeTranslation, normalizeLyrics, parseLyricText, type LyricFormat, type LyricLine, type Song } from "./shared";
 import { DEFAULT_SETTINGS, PROVIDER_PRIORITY, SOURCE_TIMEOUT_MS, type ExternalProviderName, type ProviderName, type Settings } from "./settings";
-import { normalizeSongKey } from "./matcher";
+import { evaluateMatch, normalizeSongKey } from "./matcher";
 import { bindWheelScroll, type AmllPlayerLike } from "./scroll-adapter";
 
 type Source = ProviderName | "none";
 type DebugInfo = { source: Source; format: LyricFormat; matched?: string; status: string; rawPreview: string; at: string; confidence?: number; durationMs?: number };
 type ProviderResult = { source: ExternalProviderName; format: LyricFormat; text: string; translation?: string; romanization?: string; matched?: string; debug?: string; confidence?: number; qualified?: boolean; matchReason?: string };
-type ParsedResult = { source: ProviderName; format: LyricFormat; lines: LyricLine[]; raw: string; matched?: string; confidence: number; debug?: string; qualified: boolean; matchReason?: string };
+type ParsedResult = { source: ProviderName; format: LyricFormat; lines: LyricLine[]; raw: string; matched?: string; confidence: number; debug?: string; qualified: boolean; matchReason?: string; fallback?: boolean };
 
 const lines = shallowRef<LyricLine[]>([]);
 const displayLines = shallowRef<LyricLine[]>([]);
@@ -385,7 +385,43 @@ async function loadExternalProvider(song: Song, provider: ExternalProviderName) 
       chrome.runtime.sendMessage({ type: "fetchProviderLyrics", provider, title: song.title, artist: song.artist, durationMs: songDurationMs() }),
       new Promise<null>((resolve) => window.setTimeout(() => resolve(null), SOURCE_TIMEOUT_MS)),
     ]);
-    return response?.ok && typeof response.text === "string" ? response as ProviderResult : null;
+    if (response?.ok && typeof response.text === "string") return response as ProviderResult;
+  } catch {}
+  if (provider === "amll") return loadAmlldbDirect(song);
+  return null;
+}
+
+async function loadAmlldbDirect(song: Song): Promise<ProviderResult | null> {
+  try {
+    const params = new URLSearchParams({ musicName: song.title, page: "1", pageSize: "10" });
+    const search = await fetch(`https://api.amll.dev/v1/lyrics/search?${params}`, { signal: AbortSignal.timeout(SOURCE_TIMEOUT_MS) }).then((response) => response.json());
+    const items = Array.isArray(search?.data?.items) ? search.data.items : [];
+    const candidates = items.map((item: any) => ({
+      item,
+      title: item.musicNames?.[0] || "",
+      artist: item.artistNames?.join(" / ") || "",
+      match: evaluateMatch({ title: song.title, artist: undefined, durationMs: songDurationMs() }, { title: item.musicNames?.[0] || "", artist: item.artistNames?.join(" / ") || "" }),
+    })).filter((entry: any) => entry.match.qualified).slice(0, 3);
+    const results = await Promise.all(candidates.map(async (entry: any) => {
+      try {
+        const detail = await fetch(`https://api.amll.dev/v1/lyrics/get?id=${encodeURIComponent(String(entry.item.id))}`, { signal: AbortSignal.timeout(SOURCE_TIMEOUT_MS) }).then((response) => response.json());
+        const text = detail?.data?.lyrics;
+        if (typeof text !== "string" || !text.trim()) return null;
+        return {
+          source: "amll" as const,
+          format: "ttml" as const,
+          text,
+          matched: entry.title,
+          confidence: Math.round(entry.match.combined * 100),
+          qualified: true,
+          debug: `AMLL 直连兜底 #${entry.item.id}；匹配度 ${Math.round(entry.match.combined * 100)}%`,
+          matchReason: entry.match.reason,
+        } satisfies ProviderResult;
+      } catch {
+        return null;
+      }
+    }));
+    return results.find((result): result is ProviderResult => !!result) || null;
   } catch {
     return null;
   }
@@ -457,7 +493,7 @@ async function loadTrack(key: string, payload?: unknown) {
       selected = result;
       lines.value = result.lines;
       if (!state.firstLyricAt) state.firstLyricAt = Date.now() - state.loadStarted;
-      void persistCache(cacheKey, { source: result.source, format: result.format, lines: result.lines, raw: result.raw, matched: result.matched, confidence: result.confidence, fallback: false });
+      void persistCache(cacheKey, { source: result.source, format: result.format, lines: result.lines, raw: result.raw, matched: result.matched, confidence: result.confidence, fallback: result.fallback === true });
       setDebug(result.source, result.format, `${result.debug || "歌词成功"}；匹配度 ${result.confidence || 0}%`, result.raw, result.matched, result.confidence, Date.now() - state.loadStarted);
       showAmll();
     };
