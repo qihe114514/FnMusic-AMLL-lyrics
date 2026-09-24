@@ -281,8 +281,11 @@ function seekToLine(event: { lineIndex: number }) {
   slider.setAttribute("step", oldStep);
   currentTime.value = Math.round(target * 1000);
   state.bridge = { currentTimeMs: currentTime.value, observedAt: performance.now(), playing: playing.value };
-  getAmllPlayer()?.setCurrentTime?.(currentTime.value + Number(settings.value.offset || 0), true);
+  // 不传入 seek 标志，让 AMLL 走普通行切换的逐行错峰弹簧动画；
+  // 通过手动 resetScroll + calcLayout 保证进度跳转后仍然对齐到目标歌词行。
+  getAmllPlayer()?.setCurrentTime?.(currentTime.value + Number(settings.value.offset || 0));
   getAmllPlayer()?.resetScroll?.();
+  getAmllPlayer()?.calcLayout?.();
   startProgressLoop();
 }
 
