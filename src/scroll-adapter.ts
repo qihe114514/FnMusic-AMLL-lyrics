@@ -7,6 +7,7 @@ export type AmllScrollState = {
 
 export type AmllPlayerLike = {
   beginScrollHandler?: () => boolean;
+  setCurrentTime?: (time: number, isSeek?: boolean) => void;
   resetScroll?: () => void;
   calcLayout?: (sync?: boolean, force?: boolean) => void | Promise<void>;
   scrollState?: AmllScrollState;

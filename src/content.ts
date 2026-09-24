@@ -169,6 +169,11 @@ async function persistCache(key: string, entry: Omit<NonNullable<ReturnType<type
   await chrome.storage.local.set({ lyricCache: Object.fromEntries(entries) }).catch(() => {});
 }
 
+function getAmllPlayer(): AmllPlayerLike | undefined {
+  const exposed = playerRef.value?.lyricPlayer;
+  return (exposed?.value ?? exposed) as AmllPlayerLike | undefined;
+}
+
 function seekToLine(event: { lineIndex: number }) {
   const line = lines.value[event.lineIndex];
   const slider = document.querySelector<HTMLInputElement>('[aria-label="播放进度"]');
@@ -189,8 +194,8 @@ function seekToLine(event: { lineIndex: number }) {
   slider.setAttribute("step", oldStep);
   currentTime.value = Math.round(target * 1000);
   state.bridge = { currentTimeMs: currentTime.value, observedAt: performance.now(), playing: playing.value };
-  playerRef.value?.lyricPlayer?.value?.setCurrentTime(currentTime.value + Number(settings.value.offset || 0), true);
-  playerRef.value?.lyricPlayer?.value?.resetScroll?.();
+  getAmllPlayer()?.setCurrentTime?.(currentTime.value + Number(settings.value.offset || 0), true);
+  getAmllPlayer()?.resetScroll?.();
   startProgressLoop();
 }
 
@@ -282,7 +287,7 @@ function mount(target: HTMLElement) {
     alignAnchor: "center",
     alignPosition: state.alignPosition,
     enableSpring: settings.value.spring,
-    enableBlur: settings.value.blur,
+    enableBlur: settings.value.blur && playing.value,
     enableScale: settings.value.scale,
     wordFadeWidth: Math.max(0.0001, Number(settings.value.wordFadeWidth) || 0.5),
     lyricLines: displayLines.value,
@@ -716,7 +721,7 @@ window.addEventListener("online", () => {
   void loadTrack(key);
 });
 
-bindWheelScroll(() => state.root, () => playerRef.value?.lyricPlayer?.value as AmllPlayerLike | undefined);
+bindWheelScroll(() => state.root, () => getAmllPlayer());
 window.postMessage({ source: "fnmusic-amll-request-track" }, "*");
 chrome.runtime.sendMessage({ type: "getSettings" }).then((saved) => { if (saved) Object.assign(settings.value, saved); applySettingsStyle(); }).catch(() => {});
 
