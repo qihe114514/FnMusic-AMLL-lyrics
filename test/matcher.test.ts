@@ -58,3 +58,12 @@ test("rejects too many unmatched artists", () => {
 test("builds a stable cache key from title, artist and duration", () => {
   assert.equal(normalizeSongKey({ title: "晴天", artist: "周杰伦", durationMs: 269_000 }), "晴天|周杰伦|269");
 });
+
+test("rejects matching an original song with an instrumental version", () => {
+  const result = evaluateMatch(
+    { title: "使一颗心免于哀伤", artist: "HOYO-MiX / 知更鸟", durationMs: 202_000 },
+    { title: "使一颗心免于哀伤（伴奏）", artist: "HOYO-MiX / 知更鸟", durationMs: 202_000 },
+  );
+  assert.equal(result.versionPass, false);
+  assert.equal(result.qualified, false);
+});
