@@ -560,7 +560,7 @@ window.addEventListener("message", (event) => {
   }
   const song = readSong();
   const key = trackKey(song);
-  if (key === state.trackKey && (lines.value.length > 0 || Date.now() - state.loadStarted < 3000)) return;
+  if (key === state.trackKey && (lines.value.length > 0 || (!event.data.payload && Date.now() - state.loadStarted < 3000))) return;
   void loadTrack(key, event.data.payload);
 });
 
