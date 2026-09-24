@@ -96,10 +96,17 @@ function resultFromMatch(
 }
 
 async function fetchAmlldb(request: ExternalRequest) {
-  const params = new URLSearchParams({ musicName: request.title, page: "1", pageSize: "10" });
-  if (request.artist) params.set("artistName", request.artist);
-  const search = await getJson(`https://api.amll.dev/v1/lyrics/search?${params}`);
-  const items = Array.isArray(search?.data?.items) ? search.data.items : [];
+  const createParams = (includeArtist: boolean) => {
+    const params = new URLSearchParams({ musicName: request.title, page: "1", pageSize: "10" });
+    if (includeArtist && request.artist) params.set("artistName", request.artist);
+    return params;
+  };
+  let search = await getJson(`https://api.amll.dev/v1/lyrics/search?${createParams(true)}`);
+  let items = Array.isArray(search?.data?.items) ? search.data.items : [];
+  if (!items.length && request.artist) {
+    search = await getJson(`https://api.amll.dev/v1/lyrics/search?${createParams(false)}`);
+    items = Array.isArray(search?.data?.items) ? search.data.items : [];
+  }
   const candidates: Candidate[] = items.map((item: any) => ({
     raw: item,
     id: item.id,

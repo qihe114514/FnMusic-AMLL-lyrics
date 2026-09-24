@@ -23,14 +23,16 @@ const playerRef = shallowRef<any>(null);
 type BackgroundInstance = { setRenderScale(scale: number): void; setFPS(fps: number): void; setStaticMode(enable: boolean): void; setLowFreqVolume(volume: number): void; setHasLyric(hasLyric: boolean): void; setAlbum(album: string | HTMLImageElement): Promise<void>; pause(): void; resume(): void; getElement(): HTMLElement; dispose(): void };
 const createBackground = (renderer: string) => CoreBackgroundRender.new((renderer === "pixi" ? PixiRenderer : MeshGradientRenderer) as typeof MeshGradientRenderer) as BackgroundInstance;
 const state = { trackKey: "", trackGUID: "", titleKey: "", trackCacheKey: "", root: null as HTMLElement | null, app: null as ReturnType<typeof createApp> | null, backgroundRoot: null as HTMLElement | null, backgroundHost: null as HTMLElement | null, background: null as BackgroundInstance | null, backgroundRenderer: "mesh", backgroundPlaying: true, backgroundAlbum: "", original: null as HTMLElement | null, loadToken: 0, lastTime: -1, loadStarted: 0, firstLyricAt: 0, raf: 0, bridge: null as PlaybackAnchor | null, lowFreqVolume: 1, alignPosition: 0.3 };
-const lyricCache = new Map<string, { source: Source; format: LyricFormat; lines: LyricLine[]; raw: string; matched?: string; confidence?: number; at: number }>();
+const LYRIC_CACHE_VERSION = 2;
+const lyricCache = new Map<string, { source: Source; format: LyricFormat; lines: LyricLine[]; raw: string; matched?: string; confidence?: number; at: number; v?: number }>();
 const lyricSizePresets: Record<string, string> = { tiny: "14px", "extra-small": "16px", small: "18px", medium: "22px", large: "26px", "extra-large": "30px", huge: "36px" };
 const cacheReady = chrome.storage.local.get({ lyricCache: {} }).then(({ lyricCache: saved }) => {
   if (!saved || typeof saved !== "object") return;
   for (const [key, value] of Object.entries(saved as Record<string, unknown>)) {
-    const item = value as Partial<{ source: Source; format: LyricFormat; lines: LyricLine[]; raw: string; matched?: string; confidence?: number; at: number }>;
+    const item = value as Partial<{ source: Source; format: LyricFormat; lines: LyricLine[]; raw: string; matched?: string; confidence?: number; at: number; v?: number }>;
     if ((item as { source?: string }).source === "qq") continue;
-    if (Array.isArray(item.lines) && item.lines.length && typeof item.raw === "string") lyricCache.set(key, { source: item.source || "none", format: item.format || "ttml", lines: item.lines, raw: item.raw, matched: item.matched, confidence: item.confidence, at: Number(item.at) || Date.now() });
+    if (item.v !== LYRIC_CACHE_VERSION) continue;
+    if (Array.isArray(item.lines) && item.lines.length && typeof item.raw === "string") lyricCache.set(key, { source: item.source || "none", format: item.format || "ttml", lines: item.lines, raw: item.raw, matched: item.matched, confidence: item.confidence, at: Number(item.at) || Date.now(), v: LYRIC_CACHE_VERSION });
   }
 }).catch(() => {});
 
@@ -39,19 +41,90 @@ function isFeiniuPlayer() {
     && !!document.querySelector('.music-player-track-entry, [aria-label="全屏显示"], [aria-label="播放进度"]');
 }
 
+const UI_LABELS = new Set([
+  "播放", "暂停", "上一首", "下一首", "收藏", "已收藏", "分享", "更多", "评论",
+  "下载", "添加到歌单", "全屏显示", "退出全屏", "关闭", "歌词", "音质", "倍速",
+  "播放列表", "喜欢", "不感兴趣", "随机播放", "循环播放", "单曲循环",
+]);
+
+function cleanSongText(value: string | null | undefined, title: string) {
+  const text = value?.replace(/\s+/g, " ").trim() || "";
+  if (!text || text === title || text.length > 80) return "";
+  if (UI_LABELS.has(text)) return "";
+  return text;
+}
+
 function readSong(): Song {
   const node = [...document.querySelectorAll<HTMLElement>("[data-track-guid], [data-track-guid-id], [data-guid]")].find((item) => item.dataset.trackGuid || item.dataset.trackGuidId || item.dataset.guid);
   const dialog = document.querySelector<HTMLElement>('[role="dialog"][aria-label]');
   const title = dialog?.getAttribute("aria-label")?.trim() || document.title.split("-")[0].trim();
-  const artist = [...(dialog?.querySelectorAll<HTMLElement>("button") || [])].map((button) => button.textContent?.replace(/\s+/g, " ").trim()).find((text) => !!text && text !== title);
+  const artist = readArtistFromDialog(dialog, title);
   const guid = node?.dataset.trackGuid || node?.dataset.trackGuidId || node?.dataset.guid || `__title__${title}`;
   return { title, artist, guid };
+}
+
+function readArtistFromDialog(dialog: HTMLElement | null, title: string) {
+  if (!dialog) return undefined;
+  const preferred = [...dialog.querySelectorAll<HTMLElement>('[data-artist], a[href*="/artist"], [class*="artist" i], [aria-label*="歌手"], [title*="歌手"]')];
+  for (const element of preferred) {
+    const value = cleanSongText(element.textContent, title);
+    if (value) return value;
+  }
+  const candidates = [...dialog.querySelectorAll<HTMLElement>("button, a, span")]
+    .map((element) => cleanSongText(element.textContent, title))
+    .filter(Boolean);
+  return candidates[0] || undefined;
 }
 
 function findNativeLyrics() { return document.querySelector<HTMLElement>(".music-player-karaoke-live-track"); }
 function findViewport(target?: HTMLElement | null) { return target?.closest<HTMLElement>(".music-player-karaoke-lyrics") || document.querySelector<HTMLElement>(".music-player-karaoke-lyrics"); }
 function findFullscreenDialog(target?: HTMLElement | null) { return target?.closest<HTMLElement>('[role="dialog"]') || null; }
-function readNativeText() { return [...document.querySelectorAll<HTMLElement>('.music-player-karaoke-live-track [data-karaoke-line="true"]')].map((node) => node.textContent?.replace(/\s+/g, " ").trim()).filter(Boolean).join("\n"); }
+
+function joinSegmentText(node: HTMLElement) {
+  const segments = [...node.querySelectorAll<HTMLElement>(".music-player-karaoke-segment, [data-karaoke-segment]")];
+  if (!segments.length) return node.textContent?.replace(/\s+/g, " ").trim() || "";
+  let text = "";
+  for (const segment of segments) {
+    const part = segment.textContent || "";
+    if (!part) continue;
+    if (text && /[A-Za-z0-9]$/.test(text) && /^[A-Za-z0-9]/.test(part)) text += " ";
+    text += part;
+  }
+  return text.replace(/\s+/g, " ").trim();
+}
+
+function readNativeTranslation(node: HTMLElement, mainText: string) {
+  const selectors = [
+    '[data-karaoke-translation="true"]',
+    '[data-translation]',
+    '.music-player-karaoke-translation',
+    '[class*="translation" i]',
+    '[class*="translate" i]',
+  ];
+  for (const selector of selectors) {
+    for (const element of node.querySelectorAll<HTMLElement>(selector)) {
+      const text = cleanSongText(element.textContent, mainText);
+      if (text && text !== mainText) return text;
+    }
+  }
+  return "";
+}
+
+function readNativeLyrics(): LyricLine[] {
+  const nodes = [...document.querySelectorAll<HTMLElement>('.music-player-karaoke-live-track [data-karaoke-line="true"]')];
+  const entries = nodes.map((node) => ({ node, text: joinSegmentText(node), translation: "" })).filter((entry) => !!entry.text);
+  if (!entries.length) {
+    const container = findNativeLyrics();
+    const text = container?.innerText?.replace(/\r/g, "").trim() || "";
+    return text ? parseLyricText(text, "text") : [];
+  }
+  for (const entry of entries) {
+    entry.translation = readNativeTranslation(entry.node, entry.text);
+  }
+  const fallback = parseLyricText(entries.map((entry) => entry.text).join("\n"), "text");
+  return fallback.map((line, index) => ({ ...line, translatedLyric: entries[index]?.translation || "" }));
+}
+
 function trackKey(song: Song) { const slider = document.querySelector<HTMLInputElement>('[aria-label="播放进度"]'); return `${song.guid}|${song.title}|${slider?.max || ""}`; }
 function songDurationMs() { return Number(document.querySelector<HTMLInputElement>('[aria-label="播放进度"]')?.max || 0) * 1000; }
 function songCacheKey(song: Song) { return normalizeSongKey({ title: song.title, artist: song.artist, durationMs: songDurationMs() }); }
@@ -74,7 +147,7 @@ function refreshDisplayLines() {
 
 async function persistCache(key: string, entry: Omit<NonNullable<ReturnType<typeof lyricCache.get>>, "at">) {
   if (!key) return;
-  lyricCache.set(key, { ...entry, at: Date.now() });
+  lyricCache.set(key, { ...entry, at: Date.now(), v: LYRIC_CACHE_VERSION });
   const entries = [...lyricCache.entries()].sort(([, a], [, b]) => b.at - a.at).slice(0, 80);
   lyricCache.clear();
   for (const [entryKey, value] of entries) lyricCache.set(entryKey, value);
@@ -315,70 +388,95 @@ async function loadTrack(key: string, payload?: unknown) {
   lines.value = [];
   displayLines.value = [];
   claimAmll();
-  await cacheReady;
-  const cached = lyricCache.get(cacheKey) || lyricCache.get(key);
-  if (cached) {
-    if (token !== state.loadToken) return;
-    lines.value = cached.lines.map((line) => ({ ...line, words: line.words.map((word) => ({ ...word })) }));
-    state.firstLyricAt = Date.now() - state.loadStarted;
-    setDebug(cached.source, cached.format, "使用歌词缓存", cached.raw, cached.matched, cached.confidence, state.firstLyricAt);
-    showAmll();
-    return;
-  }
 
-  let selected: ParsedResult | null = null;
-  const commit = (result: ParsedResult) => {
-    if (token !== state.loadToken || !result.qualified || !result.lines.length) return;
-    const rank = PROVIDER_PRIORITY.indexOf(result.source);
-    if (selected) {
-      const selectedRank = PROVIDER_PRIORITY.indexOf(selected.source);
-      if (rank > selectedRank) return;
-      if (rank === selectedRank && (result.confidence || 0) <= (selected.confidence || 0)) return;
-    }
-    selected = result;
-    lines.value = result.lines;
-    if (!state.firstLyricAt) state.firstLyricAt = Date.now() - state.loadStarted;
-    void persistCache(cacheKey, { source: result.source, format: result.format, lines: result.lines, raw: result.raw, matched: result.matched, confidence: result.confidence });
-    setDebug(result.source, result.format, `${result.debug || "歌词成功"}；匹配度 ${result.confidence || 0}%`, result.raw, result.matched, result.confidence, Date.now() - state.loadStarted);
+  let watchdog = 0;
+  const fallbackToNative = async () => {
+    if (token !== state.loadToken) return false;
+    const fallback = readNativeLyrics();
+    if (!fallback.length) return false;
+    lines.value = fallback;
+    await persistCache(cacheKey, { source: "feiniu", format: "ttml", lines: fallback, raw: linesToTtml(fallback) });
+    setDebug("feiniu", "ttml", "FnMusic 页面歌词转换为标准 TTML", linesToTtml(fallback), undefined, undefined, Date.now() - state.loadStarted);
     showAmll();
+    return true;
   };
 
-  const externalTasks = enabledExternalProviders().map((provider) => loadExternalProvider(song, provider).then((raw) => {
-    const parsed = raw ? parseProviderResult(raw) : null;
-    if (parsed) commit(parsed);
-  }).catch(() => {}));
-
-  let nativeResult: ParsedResult | null = null;
-  const nativeTask = loadFeiniu(state.trackGUID, payload).then((native) => {
-    if (!native?.lines.length) return;
-    nativeResult = {
-      source: "feiniu",
-      format: native.format,
-      lines: native.lines,
-      raw: native.raw,
-      matched: song.title,
-      confidence: state.trackGUID.startsWith("__title__") ? 70 : 90,
-      qualified: true,
-      debug: "FnMusic 自带歌词",
-    };
-  }).catch(() => {});
-
-  await Promise.allSettled([...externalTasks, nativeTask]);
-  if (token !== state.loadToken) return;
-  if (!selected && nativeResult) commit(nativeResult);
-
-  if (!selected) {
-    const text = readNativeText();
-    const fallback = text ? parseLyricText(text, "text") : [];
-    if (fallback.length) {
-      lines.value = fallback;
-      await persistCache(cacheKey, { source: "feiniu", format: "ttml", lines: fallback, raw: linesToTtml(fallback) });
-      setDebug("feiniu", "ttml", `FnMusic 页面歌词转换为标准 TTML，优先级：${PROVIDER_PRIORITY.join("→")}`, linesToTtml(fallback), undefined, undefined, Date.now() - state.loadStarted);
+  try {
+    await cacheReady;
+    const cached = lyricCache.get(cacheKey) || lyricCache.get(key);
+    if (!cached) void fallbackToNative();
+    if (cached) {
+      if (token !== state.loadToken) return;
+      lines.value = cached.lines.map((line) => ({ ...line, words: line.words.map((word) => ({ ...word })) }));
+      state.firstLyricAt = Date.now() - state.loadStarted;
+      setDebug(cached.source, cached.format, "使用歌词缓存", cached.raw, cached.matched, cached.confidence, state.firstLyricAt);
       showAmll();
       return;
     }
-    setDebug("none", "text", "无可用歌词", "");
-    showOriginal();
+
+    let selected: ParsedResult | null = null;
+    const commit = (result: ParsedResult) => {
+      if (token !== state.loadToken || !result.qualified || !result.lines.length) return;
+      const rank = PROVIDER_PRIORITY.indexOf(result.source);
+      if (selected) {
+        const selectedRank = PROVIDER_PRIORITY.indexOf(selected.source);
+        if (rank > selectedRank) return;
+        if (rank === selectedRank && (result.confidence || 0) <= (selected.confidence || 0)) return;
+      }
+      selected = result;
+      lines.value = result.lines;
+      if (!state.firstLyricAt) state.firstLyricAt = Date.now() - state.loadStarted;
+      void persistCache(cacheKey, { source: result.source, format: result.format, lines: result.lines, raw: result.raw, matched: result.matched, confidence: result.confidence });
+      setDebug(result.source, result.format, `${result.debug || "歌词成功"}；匹配度 ${result.confidence || 0}%`, result.raw, result.matched, result.confidence, Date.now() - state.loadStarted);
+      showAmll();
+    };
+
+    const externalTasks = enabledExternalProviders().map((provider) => loadExternalProvider(song, provider).then((raw) => {
+      const parsed = raw ? parseProviderResult(raw) : null;
+      if (parsed) commit(parsed);
+    }).catch(() => {}));
+
+    let nativeResult: ParsedResult | null = null;
+    const nativeTask = loadFeiniu(state.trackGUID, payload).then((native) => {
+      if (!native?.lines.length) return;
+      nativeResult = {
+        source: "feiniu",
+        format: native.format,
+        lines: native.lines,
+        raw: native.raw,
+        matched: song.title,
+        confidence: state.trackGUID.startsWith("__title__") ? 70 : 90,
+        qualified: true,
+        debug: "FnMusic 自带歌词",
+      };
+    }).catch(() => {});
+
+    watchdog = window.setTimeout(() => {
+      void (async () => {
+        if (token !== state.loadToken || lines.value.length) return;
+        if (nativeResult) commit(nativeResult);
+        if (!lines.value.length) await fallbackToNative();
+        if (!lines.value.length) {
+          setDebug("none", "text", "无可用歌词", "");
+          showOriginal();
+        }
+      })();
+    }, 4_000);
+
+    await Promise.allSettled([...externalTasks, nativeTask]);
+    if (token !== state.loadToken) return;
+    if (!selected && nativeResult) commit(nativeResult);
+    if (!selected && await fallbackToNative()) return;
+    if (!selected) {
+      setDebug("none", "text", "无可用歌词", "");
+      showOriginal();
+    }
+  } catch (error) {
+    if (token !== state.loadToken) return;
+    setDebug("none", "text", `加载失败：${error instanceof Error ? error.message : String(error)}`, "");
+    if (!(await fallbackToNative())) showOriginal();
+  } finally {
+    if (watchdog) window.clearTimeout(watchdog);
   }
 }
 

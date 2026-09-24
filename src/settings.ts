@@ -56,5 +56,5 @@ export const DEFAULT_SETTINGS: Settings = {
   showDebug: false,
 };
 
-export const SOURCE_TIMEOUT_MS = 1500;
+export const SOURCE_TIMEOUT_MS = 3000;
 export const CACHE_TTL_MS = 10 * 60 * 1000;

@@ -59,11 +59,24 @@ export function normalizeLyrics(value: unknown, format?: LyricFormat): LyricLine
   const list = Array.isArray(data.list) ? data.list : [];
   const preferred = typeof data.preferred === "string" ? data.preferred : "";
   const preferredItem = list.find((item) => item && typeof item === "object" && (item as RawRecord).guid === preferred);
-  const lyricItem = preferredItem || list.find((item) => item && typeof item === "object" && typeof (item as RawRecord).content === "string");
+  const lyricItem = preferredItem || list.find((item) => item && typeof item === "object" && (typeof (item as RawRecord).content === "string" || Array.isArray((item as RawRecord).lines) || Array.isArray((item as RawRecord).lyrics)));
   if (lyricItem && typeof lyricItem === "object") {
     const item = lyricItem as RawRecord;
+    const structuredLines = Array.isArray(item.lines) ? item.lines : Array.isArray(item.lyrics) ? item.lyrics : null;
+    if (structuredLines) {
+      const parsed = structuredLines.map((line) => line && typeof line === "object" ? normalizeStructuredLine(line as RawRecord) : null).filter((line): line is LyricLine => !!line);
+      if (parsed.length) return mergeParallelLines(parsed);
+    }
     const content = typeof item.content === "string" ? item.content : "";
-    if (content) return parseLyricText(content, item.isLRC === true ? "lrc" : format);
+    if (content) {
+      const parsed = parseLyricText(content, item.isLRC === true ? "lrc" : format);
+      const translationText = [item.translation, item.translatedLyric, item.tlyric].find((value): value is string => typeof value === "string" && value.trim().length > 0);
+      if (parsed.length && translationText) {
+        const translation = parseLyricText(translationText, "lrc");
+        return translation.length ? mergeTranslation(parsed, translation) : parsed;
+      }
+      if (parsed.length) return parsed;
+    }
   }
 
   for (const key of ["content", "ttml", "qrc", "yrc", "krc", "lrc", "rawLyric", "text", "lyric", "lyrics"]) {
@@ -82,7 +95,7 @@ export function normalizeLyrics(value: unknown, format?: LyricFormat): LyricLine
 
 function normalizeStructuredLine(record: RawRecord): LyricLine | null {
   const safe = (value: unknown, fallback: number) => Number.isFinite(Number(value)) ? Number(value) : fallback;
-  const rawWords = Array.isArray(record.words) ? record.words : Array.isArray(record.syllables) ? record.syllables : null;
+  const rawWords = Array.isArray(record.words) ? record.words : Array.isArray(record.syllables) ? record.syllables : Array.isArray(record.segments) ? record.segments : null;
   if (!rawWords && typeof record.text !== "string" && typeof record.content !== "string") return null;
   const lineStart = safe(record.startTime ?? record.start ?? record.time, 0);
   const lineEnd = safe(record.endTime ?? record.end, lineStart + safe(record.duration, 0));
