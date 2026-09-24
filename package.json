@@ -12,7 +12,7 @@
   },
   "homepage": "https://github.com/qihe114514/FnMusic-AMLL-lyrics#readme",
   "scripts": {
-    "build": "vite build",
+    "build": "node scripts/build.mjs",
     "package": "node scripts/package-release.mjs",
     "test": "node --experimental-strip-types --test test/*.test.ts",
     "typecheck": "tsc --noEmit"
