@@ -78,6 +78,53 @@ export function filterCreditLines(lines: LyricLine[]): LyricLine[] {
   return filtered.length ? filtered : lines;
 }
 
+export type LyricFilterContext = { title?: string; artist?: string; album?: string };
+
+function normalizeMetaText(value: string | undefined) {
+  return (value || "")
+    .normalize("NFKC")
+    .toLowerCase()
+    .replace(/[\(\[（【][^\)\]）】]*[\)\]）】]/g, "")
+    .replace(/[\s\-–—_/\\|,，、.。:：'"“”‘’!！?？~～·・]+/g, "");
+}
+
+function splitArtistTokens(value: string | undefined) {
+  return (value || "").split(/[\/,，、&＆;；+·・|]/).map((item) => normalizeMetaText(item)).filter(Boolean);
+}
+
+/**
+ * 过滤歌词开头的歌曲名称、歌手名、专辑名，以及标题/歌手组合行。
+ * 只检查前 8 行，避免误伤副歌里正常的歌词。
+ */
+export function filterSongMetadataLines(lines: LyricLine[], context: LyricFilterContext = {}): LyricLine[] {
+  if (!lines.length) return lines;
+  const title = normalizeMetaText(context.title);
+  const artistWhole = normalizeMetaText(context.artist);
+  const artistTokens = splitArtistTokens(context.artist);
+  const album = normalizeMetaText(context.album);
+  if (!title && !artistWhole && !album && !artistTokens.length) return lines;
+
+  const compactLimit = title.length + artistTokens.reduce((sum, token) => sum + token.length, 0) + 12;
+  const filtered = lines.filter((line, index) => {
+    if (index >= 8) return true;
+    const raw = lyricLineText(line);
+    const text = normalizeMetaText(raw);
+    if (!text) return true;
+    if (title && text === title) return false;
+    if (artistWhole && text === artistWhole) return false;
+    if (album && text === album) return false;
+    if (title && artistWhole && (text === title + artistWhole || text === artistWhole + title)) return false;
+    if (title && text.startsWith(title) && text.length <= title.length + 18) return false;
+    if (title && text.includes(title) && /(专辑|ep|单曲|album)/i.test(raw) && text.length <= title.length + 24) return false;
+    if (artistTokens.length && artistTokens.every((token) => text.includes(token)) && text.length <= compactLimit) return false;
+    if (title && title.length > 1 && text.includes(title) && artistTokens.some((token) => text.includes(token)) && text.length <= compactLimit) return false;
+    if (album && text.includes(album) && text.length <= album.length + 12) return false;
+    if (artistTokens.some((token) => token.length >= 4 && (token.startsWith(text) || text.startsWith(token)) && Math.abs(token.length - text.length) <= 4)) return false;
+    return true;
+  });
+  return filtered.length ? filtered : lines;
+}
+
 /** Convert AMLL's line model to the official AMLL TTML wire format. */
 export function linesToTtml(lines: LyricLine[]): string {
   return stringifyTTML({ lines: lines.map((line) => ({

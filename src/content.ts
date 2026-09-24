@@ -4,7 +4,7 @@ import { BackgroundRender as CoreBackgroundRender, MeshGradientRenderer, PixiRen
 import "@applemusic-like-lyrics/core/style.css";
 import "./style.css";
 import { resolvePlaybackClock, type PlaybackAnchor } from "./playback-clock";
-import { linesToTtml, mergeRomanization, mergeTranslation, normalizeLyrics, parseLyricText, type LyricFormat, type LyricLine, type Song } from "./shared";
+import { filterSongMetadataLines, linesToTtml, mergeRomanization, mergeTranslation, normalizeLyrics, parseLyricText, type LyricFormat, type LyricLine, type Song } from "./shared";
 import { DEFAULT_SETTINGS, PROVIDER_PRIORITY, SOURCE_TIMEOUT_MS, type ExternalProviderName, type ProviderName, type Settings } from "./settings";
 import { evaluateMatch, normalizeSongKey } from "./matcher";
 import { buildAmllQueryVariants } from "./lyrics/query-plan";
@@ -45,7 +45,7 @@ const createBackground = (renderer: string) => {
     console.warn = originalWarn;
   }
 };
-const state = { trackKey: "", trackGUID: "", titleKey: "", trackCacheKey: "", currentTrack: null as { guid: string; title?: string; artist?: string; durationMs?: number } | null, root: null as HTMLElement | null, app: null as ReturnType<typeof createApp> | null, backgroundRoot: null as HTMLElement | null, backgroundHost: null as HTMLElement | null, background: null as BackgroundInstance | null, backgroundRenderer: "mesh", backgroundPlaying: true, backgroundAlbum: "", backgroundFallback: false, original: null as HTMLElement | null, loadingKey: "", loadToken: 0, lastTime: -1, loadStarted: 0, firstLyricAt: 0, raf: 0, bridge: null as PlaybackAnchor | null, lowFreqVolume: 1, alignPosition: 0.3 };
+const state = { trackKey: "", trackGUID: "", titleKey: "", trackCacheKey: "", currentTrack: null as { guid: string; title?: string; artist?: string; album?: string; durationMs?: number } | null, root: null as HTMLElement | null, app: null as ReturnType<typeof createApp> | null, backgroundRoot: null as HTMLElement | null, backgroundHost: null as HTMLElement | null, background: null as BackgroundInstance | null, backgroundRenderer: "mesh", backgroundPlaying: true, backgroundAlbum: "", backgroundFallback: false, original: null as HTMLElement | null, loadingKey: "", loadToken: 0, lastTime: -1, loadStarted: 0, firstLyricAt: 0, raf: 0, bridge: null as PlaybackAnchor | null, lowFreqVolume: 1, alignPosition: 0.3 };
 const LYRIC_CACHE_VERSION = 2;
 const lyricCache = new Map<string, { source: Source; format: LyricFormat; lines: LyricLine[]; raw: string; matched?: string; confidence?: number; at: number; v?: number; fallback?: boolean }>();
 const lyricSizePresets: Record<string, string> = { tiny: "max(2.5vh, 1.25vw, 18px)", "extra-small": "max(3vh, 1.5vw, 20px)", small: "max(3.5vh, 1.75vw, 22px)", medium: "max(4.2vh, 2.1vw, 26px)", large: "max(5vh, 2.5vw, 30px)", "extra-large": "max(5.8vh, 2.9vw, 34px)", huge: "max(6.6vh, 3.3vw, 38px)" };
@@ -82,8 +82,9 @@ function readSong(): Song {
   const dialog = document.querySelector<HTMLElement>('[role="dialog"][aria-label]');
   const title = state.currentTrack?.title || dialog?.getAttribute("aria-label")?.trim() || document.title.split("-")[0].trim();
   const artist = state.currentTrack?.artist || readArtistFromDialog(dialog, title);
+  const album = state.currentTrack?.album;
   const guid = state.currentTrack?.guid || node?.dataset.trackGuid || node?.dataset.trackGuidId || node?.dataset.guid || `__title__${title}`;
-  return { title, artist, guid };
+  return { title, artist, album, guid };
 }
 
 function readArtistFromDialog(dialog: HTMLElement | null, title: string) {
@@ -330,7 +331,7 @@ function syncBackground(target?: HTMLElement | null) {
       const canvas = state.background.getElement();
       canvas.style.cssText = "position:absolute;inset:0;width:100%;height:100%;min-width:0;min-height:0;z-index:0;";
       const shade = document.createElement("div");
-      shade.style.cssText = "position:absolute;inset:0;pointer-events:none;background:linear-gradient(#0000 60%, #0000001a 100%);z-index:1;";
+      shade.style.cssText = "position:absolute;inset:0;pointer-events:none;background:radial-gradient(circle at 50% 42%, rgba(0,0,0,.12) 0%, rgba(0,0,0,.34) 72%, rgba(0,0,0,.52) 100%);z-index:1;";
       state.backgroundRoot.replaceChildren(canvas, shade);
     }
   } catch (error) {
@@ -591,12 +592,18 @@ async function loadTrack(key: string, payload?: unknown) {
     state.bridge = null;
     state.lastTime = -1;
     currentTime.value = 0;
+    const player = getAmllPlayer() as PlayerWithLyrics | undefined;
+    player?.setLyricLines?.([]);
+    player?.setCurrentTime?.(0, true);
+    player?.resetScroll?.();
+    player?.update?.(0);
   }
   state.loadStarted = Date.now();
   state.firstLyricAt = 0;
   state.trackKey = key;
   state.trackGUID = key.split("|")[0];
   const song = readSong();
+  const filterContext = { title: song.title, artist: song.artist, album: song.album };
   const durationMs = songDurationMs();
   const cacheKey = normalizeSongKey({ title: song.title, artist: song.artist, durationMs });
   state.trackCacheKey = cacheKey;
@@ -608,7 +615,7 @@ async function loadTrack(key: string, payload?: unknown) {
   let watchdog = 0;
   const fallbackToNative = async () => {
     if (token !== state.loadToken) return false;
-    const fallback = readNativeLyrics();
+    const fallback = filterSongMetadataLines(readNativeLyrics(), filterContext);
     if (!fallback.length) return false;
     lines.value = fallback;
     setDebug("feiniu", "ttml", "FnMusic 自带歌词", linesToTtml(fallback), undefined, undefined, Date.now() - state.loadStarted);
@@ -619,25 +626,35 @@ async function loadTrack(key: string, payload?: unknown) {
   try {
     await cacheReady;
     const cached = getCachedLyrics(cacheKey) || getCachedLyrics(key);
-    if (!cached) {
+    const cachedLines = cached ? filterSongMetadataLines(cached.lines, filterContext) : [];
+    if (!cached || !cachedLines.length) {
       void fallbackToNative();
-    } else if (cached.fallback && settings.value.externalLyricsEnabled) {
-      if (token !== state.loadToken) return;
-      lines.value = cached.lines.map((line) => ({ ...line, words: line.words.map((word) => ({ ...word })) }));
-      setDebug(cached.source, cached.format, "FnMusic 自带歌词（同时匹配 AMLL / 酷狗 / 网易云）", cached.raw, cached.matched, cached.confidence, Date.now() - state.loadStarted);
-      showAmll();
     } else {
-      if (token !== state.loadToken) return;
-      lines.value = cached.lines.map((line) => ({ ...line, words: line.words.map((word) => ({ ...word })) }));
-      state.firstLyricAt = Date.now() - state.loadStarted;
-      setDebug(cached.source, cached.format, "使用歌词缓存", cached.raw, cached.matched, cached.confidence, state.firstLyricAt);
-      showAmll();
-      return;
+      if (cachedLines.length !== cached.lines.length) {
+        void persistCache(cacheKey, { ...cached, lines: cachedLines, raw: linesToTtml(cachedLines) });
+      }
+      if (cached.fallback && settings.value.externalLyricsEnabled) {
+        if (token !== state.loadToken) return;
+        lines.value = cachedLines.map((line) => ({ ...line, words: line.words.map((word) => ({ ...word })) }));
+        setDebug(cached.source, cached.format, "FnMusic 自带歌词（同时匹配 AMLL / 酷狗 / 网易云）", cached.raw, cached.matched, cached.confidence, Date.now() - state.loadStarted);
+        showAmll();
+      } else {
+        if (token !== state.loadToken) return;
+        lines.value = cachedLines.map((line) => ({ ...line, words: line.words.map((word) => ({ ...word })) }));
+        state.firstLyricAt = Date.now() - state.loadStarted;
+        setDebug(cached.source, cached.format, "使用歌词缓存", cached.raw, cached.matched, cached.confidence, state.firstLyricAt);
+        showAmll();
+        return;
+      }
     }
 
     let selected: ParsedResult | null = null;
-    const commit = (result: ParsedResult) => {
-      if (token !== state.loadToken || !result.qualified || !result.lines.length) return;
+    const commit = (inputResult: ParsedResult) => {
+      if (token !== state.loadToken || !inputResult.qualified || !inputResult.lines.length) return;
+      const result = inputResult.lines.length
+        ? { ...inputResult, lines: filterSongMetadataLines(inputResult.lines, filterContext) }
+        : inputResult;
+      if (!result.lines.length) return;
       const rank = PROVIDER_PRIORITY.indexOf(result.source);
       if (selected) {
         const selectedRank = PROVIDER_PRIORITY.indexOf(selected.source);
@@ -648,8 +665,8 @@ async function loadTrack(key: string, payload?: unknown) {
       lines.value = result.lines;
       if (!state.firstLyricAt) state.firstLyricAt = Date.now() - state.loadStarted;
       if (result.source !== "feiniu" && result.fallback !== true) {
-      void persistCache(cacheKey, { source: result.source, format: result.format, lines: result.lines, raw: result.raw, matched: result.matched, confidence: result.confidence, fallback: false });
-    }
+        void persistCache(cacheKey, { source: result.source, format: result.format, lines: result.lines, raw: result.raw, matched: result.matched, confidence: result.confidence, fallback: false });
+      }
       setDebug(result.source, result.format, `${result.debug || "歌词成功"}；匹配度 ${result.confidence || 0}%`, result.raw, result.matched, result.confidence, Date.now() - state.loadStarted, attempts);
       showAmll();
     };
@@ -788,10 +805,18 @@ window.addEventListener("message", (event) => {
   if (event.data?.source === "fnmusic-amll-track" && event.data.trackGUID) {
     const track = event.data.track || {};
     const artist = Array.isArray(track.artists) ? track.artists.map((item: any) => item?.name).filter(Boolean).join(" / ") : undefined;
+    const album = typeof track.album === "string"
+      ? track.album
+      : typeof track.album?.name === "string"
+        ? track.album.name
+        : typeof track.albumName === "string"
+          ? track.albumName
+          : undefined;
     state.currentTrack = {
       guid: String(event.data.trackGUID),
       title: typeof track.title === "string" ? track.title : undefined,
       artist,
+      album,
       durationMs: Number(track.duration || track.audioSpec?.duration || 0) || undefined,
     };
     state.trackGUID = state.currentTrack.guid;
