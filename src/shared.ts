@@ -10,6 +10,10 @@ type RawRecord = Record<string, unknown>;
 const krcKey = Uint8Array.from([64, 71, 97, 119, 94, 50, 116, 71, 81, 54, 49, 45, 206, 210, 110, 105]);
 
 export function parseLyricText(input: string, format?: LyricFormat): LyricLine[] {
+  return filterCreditLines(parseLyricTextRaw(input, format));
+}
+
+function parseLyricTextRaw(input: string, format?: LyricFormat): LyricLine[] {
   const raw = input.trim();
   const text = format === "ttml" || raw.startsWith("<") ? raw : cleanLyricSource(raw);
   if (!text) return [];
@@ -29,6 +33,51 @@ export function parseLyricText(input: string, format?: LyricFormat): LyricLine[]
   }
 }
 
+const CREDIT_ROLES = [
+  "作词", "填词", "词曲", "词", "作曲", "曲", "编曲", "制作人", "制作", "监制", "出品人", "出品", "发行", "统筹", "企划", "策划",
+  "混音", "母带", "录音", "录音师", "录音棚", "录音室", "配唱", "配唱制作人", "和声", "合声", "和声编写",
+  "吉他", "贝斯", "鼓", "键盘", "弦乐", "管乐", "人声", "封面", "摄影", "设计", "导演", "音乐总监", "制作统筹", "宣发",
+  "文案", "翻译", "校对", "特别感谢", "鸣谢", "版权", "发行公司", "制作公司", "音乐制作", "母带工作室",
+  "lyricist", "lyrics?", "composer", "composed\\s+by", "music\\s+by", "written\\s+by", "songwriter", "lyric\\s+by",
+  "arranged\\s+by", "arranger", "producer", "produced\\s+by", "co-?producer", "mixing", "mixed\\s+by", "mixer",
+  "mastering", "mastered\\s+by", "mastering\\s+engineer", "recording", "recorded\\s+by", "recording\\s+engineer",
+  "recorded\\s+at", "vocals?", "lead\\s+vocals?", "backing\\s+vocals?", "background\\s+vocals?", "guitars?", "bass", "drums?",
+  "pianos?", "keyboards?", "strings", "violins?", "cellos?", "artwork", "cover\\s+art", "cover", "design", "label",
+  "publisher", "op", "sp", "director", "engineer", "studio", "album", "music\\s+production"
+];
+const CREDIT_LINE_RE = new RegExp(
+  `^(?:${CREDIT_ROLES.join("|")})(?:\\s*[、,，/&＆·・]\\s*(?:${CREDIT_ROLES.join("|")}))*\\s*(?:[A-Za-z][A-Za-z .&/-]*)?\\s*[:：]`,
+  "i",
+);
+const CREDIT_EXACT_RE = new RegExp(`^(?:${CREDIT_ROLES.join("|")})$`, "i");
+const SECTION_LINE_RE = /^[\[【(（]?\s*(?:intro|outro|interlude|verse|pre-?chorus|chorus|bridge|hook|refrain|drop|solo|主歌|副歌|间奏|前奏|尾奏|桥段|导歌|导唱|唱段)\s*\d*\s*[\]】)）]?\s*$/i;
+const NO_LYRIC_LINE_RE = /^(?:纯音乐|请欣赏|暂无歌词|无歌词|此歌曲为没有填词的纯音乐|该歌曲为纯音乐|纯音乐请欣赏|instrumental|no\s+lyrics?|music\s+only)\s*[，。.!！~～]*$/i;
+
+function lyricLineText(line: LyricLine) {
+  return line.words.map((word) => word.word).join("").trim();
+}
+
+function isCreditLineText(text: string) {
+  if (!text) return false;
+  return CREDIT_LINE_RE.test(text) || CREDIT_EXACT_RE.test(text) || SECTION_LINE_RE.test(text) || NO_LYRIC_LINE_RE.test(text);
+}
+
+/** 过滤作词/作曲/编曲/出品等制作人员信息与章节标记，只保留可演唱的正文。 */
+export function filterCreditLines(lines: LyricLine[]): LyricLine[] {
+  if (!lines.length) return lines;
+  const filtered = lines
+    .filter((line) => !isCreditLineText(lyricLineText(line)))
+    .map((line) => {
+      const translatedLyric = isCreditLineText(line.translatedLyric || "") ? "" : line.translatedLyric;
+      const romanLyric = isCreditLineText(line.romanLyric || "") ? "" : line.romanLyric;
+      return translatedLyric === line.translatedLyric && romanLyric === line.romanLyric
+        ? line
+        : { ...line, translatedLyric, romanLyric };
+    });
+  // 纯音乐或只有制作信息时，避免把整个歌词过滤空，保留原始内容。
+  return filtered.length ? filtered : lines;
+}
+
 /** Convert AMLL's line model to the official AMLL TTML wire format. */
 export function linesToTtml(lines: LyricLine[]): string {
   return stringifyTTML({ lines: lines.map((line) => ({
@@ -38,7 +87,11 @@ export function linesToTtml(lines: LyricLine[]): string {
 }
 
 export function normalizeLyrics(value: unknown, format?: LyricFormat): LyricLine[] {
-  if (typeof value === "string") return parseLyricText(value, format);
+  return filterCreditLines(normalizeLyricsRaw(value, format));
+}
+
+function normalizeLyricsRaw(value: unknown, format?: LyricFormat): LyricLine[] {
+  if (typeof value === "string") return parseLyricTextRaw(value, format);
   if (!value || typeof value !== "object") return [];
   if (Array.isArray(value)) {
     const structured = value.map((item) => item && typeof item === "object" ? normalizeStructuredLine(item as RawRecord) : null).filter((item): item is LyricLine => !!item);
@@ -46,7 +99,7 @@ export function normalizeLyrics(value: unknown, format?: LyricFormat): LyricLine
     const text = value.find((item): item is string => typeof item === "string" && isLyricText(item));
     if (text) return parseLyricText(text, format);
     for (const item of value) {
-      const parsed = normalizeLyrics(item, format);
+      const parsed = normalizeLyricsRaw(item, format);
       if (parsed.length) return parsed;
     }
     return [];
@@ -87,7 +140,7 @@ export function normalizeLyrics(value: unknown, format?: LyricFormat): LyricLine
     }
   }
   for (const key of ["lyrics", "lyric", "list", "lines", "result", "data"]) {
-    const parsed = normalizeLyrics(record[key], format);
+    const parsed = normalizeLyricsRaw(record[key], format);
     if (parsed.length) return parsed;
   }
   return [];
@@ -138,7 +191,7 @@ function mergeParallelLines(lines: LyricLine[]): LyricLine[] {
       continue;
     }
     const text = line.words.map((word) => word.word).join("").trim();
-    if (!text) continue;
+    if (!text || isCreditLineText(text)) continue;
     if (containsCjk(text) && !containsCjk(previous.words.map((word) => word.word).join(""))) previous.translatedLyric = text;
     else if (looksRomanized(text) && !previous.romanLyric) previous.romanLyric = text;
     else if (!previous.translatedLyric) previous.translatedLyric = text;
@@ -155,7 +208,9 @@ export function mergeTranslation(main: LyricLine[], translation: LyricLine[]): L
       const distance = Math.abs(item.startTime - line.startTime);
       return distance < best.distance ? { line: item, distance } : best;
     }, { line: null, distance: 120 }).line;
-    return candidate ? { ...line, translatedLyric: candidate.words.map((word) => word.word).join("").trim() } : line;
+    if (!candidate) return line;
+    const text = candidate.words.map((word) => word.word).join("").trim();
+    return text && !isCreditLineText(text) ? { ...line, translatedLyric: text } : line;
   });
 }
 
@@ -165,7 +220,9 @@ export function mergeRomanization(main: LyricLine[], romanization: LyricLine[]):
       const distance = Math.abs(item.startTime - line.startTime);
       return distance < best.distance ? { line: item, distance } : best;
     }, { line: null, distance: 120 }).line;
-    return candidate ? { ...line, romanLyric: candidate.words.map((word) => word.word).join("").trim() } : line;
+    if (!candidate) return line;
+    const text = candidate.words.map((word) => word.word).join("").trim();
+    return text && !isCreditLineText(text) ? { ...line, romanLyric: text } : line;
   });
 }
 
