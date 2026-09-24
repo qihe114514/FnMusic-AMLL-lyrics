@@ -14,7 +14,11 @@ if (!existsSync(dist)) {
 if (existsSync(output)) rmSync(output);
 
 if (process.platform === "win32") {
-  execFileSync("powershell", ["-NoProfile", "-Command", `Compress-Archive -Path '${dist}\*' -DestinationPath '${resolve(output)}' -Force`], { stdio: "inherit" });
+  try {
+    execFileSync("jar", ["cfM", output, "-C", dist, "."], { stdio: "inherit" });
+  } catch {
+    execFileSync("powershell", ["-NoProfile", "-Command", `Compress-Archive -Path '${dist}\*' -DestinationPath '${output}' -Force`], { stdio: "inherit" });
+  }
 } else {
   execFileSync("zip", ["-r", resolve(output), "."], { cwd: dist, stdio: "inherit" });
 }
