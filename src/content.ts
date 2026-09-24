@@ -22,7 +22,7 @@ const settings = ref<Settings>({ ...DEFAULT_SETTINGS });
 const playerRef = shallowRef<any>(null);
 type BackgroundInstance = { setRenderScale(scale: number): void; setFPS(fps: number): void; setStaticMode(enable: boolean): void; setLowFreqVolume(volume: number): void; setHasLyric(hasLyric: boolean): void; setAlbum(album: string | HTMLImageElement): Promise<void>; pause(): void; resume(): void; getElement(): HTMLElement; dispose(): void };
 const createBackground = (renderer: string) => CoreBackgroundRender.new((renderer === "pixi" ? PixiRenderer : MeshGradientRenderer) as typeof MeshGradientRenderer) as BackgroundInstance;
-const state = { trackKey: "", trackGUID: "", titleKey: "", trackCacheKey: "", root: null as HTMLElement | null, app: null as ReturnType<typeof createApp> | null, backgroundRoot: null as HTMLElement | null, backgroundHost: null as HTMLElement | null, background: null as BackgroundInstance | null, backgroundRenderer: "mesh", backgroundPlaying: true, backgroundAlbum: "", original: null as HTMLElement | null, loadToken: 0, lastTime: -1, loadStarted: 0, firstLyricAt: 0, raf: 0, bridge: null as PlaybackAnchor | null, lowFreqVolume: 1, alignPosition: 0.3 };
+const state = { trackKey: "", trackGUID: "", titleKey: "", trackCacheKey: "", currentTrack: null as { guid: string; title?: string; artist?: string; durationMs?: number } | null, root: null as HTMLElement | null, app: null as ReturnType<typeof createApp> | null, backgroundRoot: null as HTMLElement | null, backgroundHost: null as HTMLElement | null, background: null as BackgroundInstance | null, backgroundRenderer: "mesh", backgroundPlaying: true, backgroundAlbum: "", original: null as HTMLElement | null, loadToken: 0, lastTime: -1, loadStarted: 0, firstLyricAt: 0, raf: 0, bridge: null as PlaybackAnchor | null, lowFreqVolume: 1, alignPosition: 0.3 };
 const LYRIC_CACHE_VERSION = 2;
 const lyricCache = new Map<string, { source: Source; format: LyricFormat; lines: LyricLine[]; raw: string; matched?: string; confidence?: number; at: number; v?: number }>();
 const lyricSizePresets: Record<string, string> = { tiny: "14px", "extra-small": "16px", small: "18px", medium: "22px", large: "26px", "extra-large": "30px", huge: "36px" };
@@ -57,9 +57,9 @@ function cleanSongText(value: string | null | undefined, title: string) {
 function readSong(): Song {
   const node = [...document.querySelectorAll<HTMLElement>("[data-track-guid], [data-track-guid-id], [data-guid]")].find((item) => item.dataset.trackGuid || item.dataset.trackGuidId || item.dataset.guid);
   const dialog = document.querySelector<HTMLElement>('[role="dialog"][aria-label]');
-  const title = dialog?.getAttribute("aria-label")?.trim() || document.title.split("-")[0].trim();
-  const artist = readArtistFromDialog(dialog, title);
-  const guid = node?.dataset.trackGuid || node?.dataset.trackGuidId || node?.dataset.guid || `__title__${title}`;
+  const title = state.currentTrack?.title || dialog?.getAttribute("aria-label")?.trim() || document.title.split("-")[0].trim();
+  const artist = state.currentTrack?.artist || readArtistFromDialog(dialog, title);
+  const guid = state.currentTrack?.guid || node?.dataset.trackGuid || node?.dataset.trackGuidId || node?.dataset.guid || `__title__${title}`;
   return { title, artist, guid };
 }
 
@@ -122,8 +122,8 @@ function readNativeLyrics(): LyricLine[] {
   return fallback.map((line, index) => ({ ...line, translatedLyric: entries[index]?.translation || "" }));
 }
 
-function trackKey(song: Song) { const slider = document.querySelector<HTMLInputElement>('[aria-label="播放进度"]'); return `${song.guid}|${song.title}|${slider?.max || ""}`; }
-function songDurationMs() { return Number(document.querySelector<HTMLInputElement>('[aria-label="播放进度"]')?.max || 0) * 1000; }
+function trackKey(song: Song) { return `${song.guid}|${song.title}|${Math.round(songDurationMs() / 1000)}`; }
+function songDurationMs() { return Number(state.currentTrack?.durationMs || 0) || Number(document.querySelector<HTMLInputElement>('[aria-label="播放进度"]')?.max || 0) * 1000; }
 function songCacheKey(song: Song) { return normalizeSongKey({ title: song.title, artist: song.artist, durationMs: songDurationMs() }); }
 function enabledExternalProviders(): ExternalProviderName[] {
   if (!settings.value.externalLyricsEnabled) return [];
@@ -540,9 +540,26 @@ window.addEventListener("message", (event) => {
     if (playing.value) startProgressLoop();
     return;
   }
+  if (event.data?.source === "fnmusic-amll-track" && event.data.trackGUID) {
+    const track = event.data.track || {};
+    const artist = Array.isArray(track.artists) ? track.artists.map((item: any) => item?.name).filter(Boolean).join(" / ") : undefined;
+    state.currentTrack = {
+      guid: String(event.data.trackGUID),
+      title: typeof track.title === "string" ? track.title : undefined,
+      artist,
+      durationMs: Number(track.duration || track.audioSpec?.duration || 0) || undefined,
+    };
+    state.trackGUID = state.currentTrack.guid;
+    const song = readSong();
+    void loadTrack(trackKey(song));
+    return;
+  }
   if (event.data?.source !== "fnmusic-amll" || !event.data.trackGUID) return;
+  if (!state.currentTrack || state.currentTrack.guid !== String(event.data.trackGUID)) {
+    state.currentTrack = { guid: String(event.data.trackGUID), title: state.currentTrack?.title, artist: state.currentTrack?.artist, durationMs: state.currentTrack?.durationMs };
+  }
   const song = readSong();
-  const key = `${event.data.trackGUID}|${song.title}|${document.querySelector<HTMLInputElement>('[aria-label="播放进度"]')?.max || ""}`;
+  const key = trackKey(song);
   if (key === state.trackKey && (lines.value.length > 0 || Date.now() - state.loadStarted < 3000)) return;
   void loadTrack(key, event.data.payload);
 });
@@ -556,6 +573,7 @@ const observer = new MutationObserver(() => {
 observer.observe(document.documentElement, { childList: true, subtree: true });
 
 bindWheelScroll(() => state.root, () => playerRef.value?.lyricPlayer?.value as AmllPlayerLike | undefined);
+window.postMessage({ source: "fnmusic-amll-request-track" }, "*");
 chrome.runtime.sendMessage({ type: "getSettings" }).then((saved) => { if (saved) Object.assign(settings.value, saved); applySettingsStyle(); }).catch(() => {});
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
