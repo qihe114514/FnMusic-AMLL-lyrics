@@ -14,3 +14,6 @@ html, body, body * { font-family: "Microsoft YaHei", "PingFang SC", "Noto Sans C
 #fnmusic-amll-root .FmKaba_lyricSubLine { display: var(--amll-translation-display, block); }
 #fnmusic-amll-root .FmKaba_romanWord { display: var(--amll-roman-display, block); }
 .music-player-karaoke-live-time { display: none !important; }
+
+#fnmusic-amll-root.is-background-fallback { background: radial-gradient(circle at 50% 35%, rgba(74,64,96,.92), rgba(14,12,20,.98)) !important; }
+#fnmusic-amll-root.is-background-fallback .amll-lyric-player { --amll-lp-color: #ffffff; }

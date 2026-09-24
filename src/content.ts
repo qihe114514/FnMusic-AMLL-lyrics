@@ -29,7 +29,7 @@ const createBackground = (renderer: string) => {
     return null;
   }
 };
-const state = { trackKey: "", trackGUID: "", titleKey: "", trackCacheKey: "", currentTrack: null as { guid: string; title?: string; artist?: string; durationMs?: number } | null, root: null as HTMLElement | null, app: null as ReturnType<typeof createApp> | null, backgroundRoot: null as HTMLElement | null, backgroundHost: null as HTMLElement | null, background: null as BackgroundInstance | null, backgroundRenderer: "mesh", backgroundPlaying: true, backgroundAlbum: "", original: null as HTMLElement | null, loadToken: 0, lastTime: -1, loadStarted: 0, firstLyricAt: 0, raf: 0, bridge: null as PlaybackAnchor | null, lowFreqVolume: 1, alignPosition: 0.3 };
+const state = { trackKey: "", trackGUID: "", titleKey: "", trackCacheKey: "", currentTrack: null as { guid: string; title?: string; artist?: string; durationMs?: number } | null, root: null as HTMLElement | null, app: null as ReturnType<typeof createApp> | null, backgroundRoot: null as HTMLElement | null, backgroundHost: null as HTMLElement | null, background: null as BackgroundInstance | null, backgroundRenderer: "mesh", backgroundPlaying: true, backgroundAlbum: "", backgroundFallback: false, original: null as HTMLElement | null, loadToken: 0, lastTime: -1, loadStarted: 0, firstLyricAt: 0, raf: 0, bridge: null as PlaybackAnchor | null, lowFreqVolume: 1, alignPosition: 0.3 };
 const LYRIC_CACHE_VERSION = 2;
 const lyricCache = new Map<string, { source: Source; format: LyricFormat; lines: LyricLine[]; raw: string; matched?: string; confidence?: number; at: number; v?: number; fallback?: boolean }>();
 const lyricSizePresets: Record<string, string> = { tiny: "14px", "extra-small": "16px", small: "18px", medium: "22px", large: "26px", "extra-large": "30px", huge: "36px" };
@@ -192,6 +192,11 @@ function updateAlignPosition(viewport: HTMLElement) {
   state.alignPosition = Math.max(0.1, Math.min(0.9, (coverBox.top + coverBox.height / 2 - viewportBox.top) / viewportBox.height));
 }
 
+function applyBackgroundVisibility() {
+  if (!state.root) return;
+  state.root.classList.toggle("is-background-fallback", !state.background);
+}
+
 function syncBackground(target?: HTMLElement | null) {
   const dialog = findFullscreenDialog(target || findNativeLyrics());
   if (!dialog) return;
@@ -227,9 +232,17 @@ function syncBackground(target?: HTMLElement | null) {
     state.backgroundRoot?.remove();
     state.backgroundRoot = null;
     state.background = null;
+    state.backgroundFallback = true;
+    applyBackgroundVisibility();
     return;
   }
-  if (!state.background || !state.backgroundRoot) return;
+  if (!state.background || !state.backgroundRoot) {
+    state.backgroundFallback = true;
+    applyBackgroundVisibility();
+    return;
+  }
+  state.backgroundFallback = false;
+  applyBackgroundVisibility();
   nativeBackground.style.setProperty("background", "transparent", "important");
   nativeBackground.style.setProperty("background-image", "none", "important");
   if (state.backgroundRoot.parentNode !== host) host.appendChild(state.backgroundRoot);
@@ -250,6 +263,7 @@ function mount(target: HTMLElement) {
   state.root = document.createElement("div");
   state.root.id = "fnmusic-amll-root";
   target.appendChild(state.root);
+  applyBackgroundVisibility();
   state.app = createApp({ setup: () => () => h(LyricPlayer, {
     ref: playerRef,
     disabled: false,
