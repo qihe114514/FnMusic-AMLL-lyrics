@@ -101,12 +101,15 @@ async function fetchAmlldb(request: ExternalRequest) {
     if (includeArtist && request.artist) params.set("artistName", request.artist);
     return params;
   };
+  let usedArtistSearch = true;
   let search = await getJson(`https://api.amll.dev/v1/lyrics/search?${createParams(true)}`);
   let items = Array.isArray(search?.data?.items) ? search.data.items : [];
   if (!items.length && request.artist) {
+    usedArtistSearch = false;
     search = await getJson(`https://api.amll.dev/v1/lyrics/search?${createParams(false)}`);
     items = Array.isArray(search?.data?.items) ? search.data.items : [];
   }
+  const matchInput = usedArtistSearch ? request : { ...request, artist: undefined };
   const candidates: Candidate[] = items.map((item: any) => ({
     raw: item,
     id: item.id,
@@ -114,7 +117,7 @@ async function fetchAmlldb(request: ExternalRequest) {
     artist: item.artistNames?.join(" / ") || "",
     durationMs: candidateDuration(item),
   }));
-  const ranked = rankCandidates(request, candidates).filter((entry) => entry.match.qualified).slice(0, 3);
+  const ranked = rankCandidates(matchInput, candidates).filter((entry) => entry.match.qualified).slice(0, 3);
   if (!ranked.length) throw new Error("AMLL 无匹配歌词");
 
   const results = await Promise.all(ranked.map(async ({ candidate, match }) => {

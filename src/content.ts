@@ -70,10 +70,7 @@ function readArtistFromDialog(dialog: HTMLElement | null, title: string) {
     const value = cleanSongText(element.textContent, title);
     if (value) return value;
   }
-  const candidates = [...dialog.querySelectorAll<HTMLElement>("button, a, span")]
-    .map((element) => cleanSongText(element.textContent, title))
-    .filter(Boolean);
-  return candidates[0] || undefined;
+  return undefined;
 }
 
 function findNativeLyrics() { return document.querySelector<HTMLElement>(".music-player-karaoke-live-track"); }
