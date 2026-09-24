@@ -21,18 +21,25 @@ const playing = ref(false);
 const settings = ref<Settings>({ ...DEFAULT_SETTINGS });
 const playerRef = shallowRef<any>(null);
 type BackgroundInstance = { setRenderScale(scale: number): void; setFPS(fps: number): void; setStaticMode(enable: boolean): void; setLowFreqVolume(volume: number): void; setHasLyric(hasLyric: boolean): void; setAlbum(album: string | HTMLImageElement): Promise<void>; pause(): void; resume(): void; getElement(): HTMLElement; dispose(): void };
-const createBackground = (renderer: string) => CoreBackgroundRender.new((renderer === "pixi" ? PixiRenderer : MeshGradientRenderer) as typeof MeshGradientRenderer) as BackgroundInstance;
+const createBackground = (renderer: string) => {
+  try {
+    return CoreBackgroundRender.new((renderer === "pixi" ? PixiRenderer : MeshGradientRenderer) as typeof MeshGradientRenderer) as BackgroundInstance;
+  } catch (error) {
+    console.warn("[FnMusic AMLL] 背景渲染器初始化失败，已退化为无背景模式：", error);
+    return null;
+  }
+};
 const state = { trackKey: "", trackGUID: "", titleKey: "", trackCacheKey: "", currentTrack: null as { guid: string; title?: string; artist?: string; durationMs?: number } | null, root: null as HTMLElement | null, app: null as ReturnType<typeof createApp> | null, backgroundRoot: null as HTMLElement | null, backgroundHost: null as HTMLElement | null, background: null as BackgroundInstance | null, backgroundRenderer: "mesh", backgroundPlaying: true, backgroundAlbum: "", original: null as HTMLElement | null, loadToken: 0, lastTime: -1, loadStarted: 0, firstLyricAt: 0, raf: 0, bridge: null as PlaybackAnchor | null, lowFreqVolume: 1, alignPosition: 0.3 };
 const LYRIC_CACHE_VERSION = 2;
-const lyricCache = new Map<string, { source: Source; format: LyricFormat; lines: LyricLine[]; raw: string; matched?: string; confidence?: number; at: number; v?: number }>();
+const lyricCache = new Map<string, { source: Source; format: LyricFormat; lines: LyricLine[]; raw: string; matched?: string; confidence?: number; at: number; v?: number; fallback?: boolean }>();
 const lyricSizePresets: Record<string, string> = { tiny: "14px", "extra-small": "16px", small: "18px", medium: "22px", large: "26px", "extra-large": "30px", huge: "36px" };
 const cacheReady = chrome.storage.local.get({ lyricCache: {} }).then(({ lyricCache: saved }) => {
   if (!saved || typeof saved !== "object") return;
   for (const [key, value] of Object.entries(saved as Record<string, unknown>)) {
-    const item = value as Partial<{ source: Source; format: LyricFormat; lines: LyricLine[]; raw: string; matched?: string; confidence?: number; at: number; v?: number }>;
+    const item = value as Partial<{ source: Source; format: LyricFormat; lines: LyricLine[]; raw: string; matched?: string; confidence?: number; at: number; v?: number; fallback?: boolean }>;
     if ((item as { source?: string }).source === "qq") continue;
     if (item.v !== LYRIC_CACHE_VERSION) continue;
-    if (Array.isArray(item.lines) && item.lines.length && typeof item.raw === "string") lyricCache.set(key, { source: item.source || "none", format: item.format || "ttml", lines: item.lines, raw: item.raw, matched: item.matched, confidence: item.confidence, at: Number(item.at) || Date.now(), v: LYRIC_CACHE_VERSION });
+    if (Array.isArray(item.lines) && item.lines.length && typeof item.raw === "string") lyricCache.set(key, { source: item.source || "none", format: item.format || "ttml", lines: item.lines, raw: item.raw, matched: item.matched, confidence: item.confidence, at: Number(item.at) || Date.now(), v: LYRIC_CACHE_VERSION, fallback: item.fallback === true || item.source === "feiniu" });
   }
 }).catch(() => {});
 
@@ -198,20 +205,33 @@ function syncBackground(target?: HTMLElement | null) {
   nativeBackground.style.setProperty("background", "transparent", "important");
   nativeBackground.style.setProperty("background-image", "none", "important");
   const renderer = settings.value.backgroundRenderer === "pixi" ? "pixi" : "mesh";
-  if (!state.backgroundRoot || !state.background || state.backgroundRenderer !== renderer) {
-    state.background?.dispose();
-    state.backgroundRenderer = renderer;
-    state.backgroundRoot = document.createElement("div");
-    state.backgroundRoot.id = "fnmusic-amll-background";
-    state.backgroundRoot.style.cssText = "position:absolute;inset:0;overflow:hidden;pointer-events:none;background:transparent;";
-    state.background = createBackground(renderer);
-    const canvas = state.background.getElement();
-    canvas.style.cssText = "position:absolute;inset:0;width:100%;height:100%;min-width:0;min-height:0;z-index:0;";
-    const shade = document.createElement("div");
-    shade.style.cssText = "position:absolute;inset:0;pointer-events:none;background:linear-gradient(#0000 60%, #0000001a 100%);z-index:1;";
-    state.backgroundRoot.replaceChildren(canvas, shade);
+  try {
+    if (!state.backgroundRoot || !state.background || state.backgroundRenderer !== renderer) {
+      state.background?.dispose();
+      state.backgroundRenderer = renderer;
+      state.backgroundRoot = document.createElement("div");
+      state.backgroundRoot.id = "fnmusic-amll-background";
+      state.backgroundRoot.style.cssText = "position:absolute;inset:0;overflow:hidden;pointer-events:none;background:transparent;";
+      state.background = createBackground(renderer);
+      if (!state.background) {
+        state.backgroundRoot.remove();
+        state.backgroundRoot = null;
+        return;
+      }
+      const canvas = state.background.getElement();
+      canvas.style.cssText = "position:absolute;inset:0;width:100%;height:100%;min-width:0;min-height:0;z-index:0;";
+      const shade = document.createElement("div");
+      shade.style.cssText = "position:absolute;inset:0;pointer-events:none;background:linear-gradient(#0000 60%, #0000001a 100%);z-index:1;";
+      state.backgroundRoot.replaceChildren(canvas, shade);
+    }
+    if (state.backgroundRoot.parentNode !== host) host.appendChild(state.backgroundRoot);
+  } catch (error) {
+    console.warn("[FnMusic AMLL] 背景渲染器不可用，已跳过背景创建：", error);
+    state.backgroundRoot?.remove();
+    state.backgroundRoot = null;
+    state.background = null;
+    return;
   }
-  if (state.backgroundRoot.parentNode !== host) host.appendChild(state.backgroundRoot);
   state.backgroundHost = nativeBackground;
   applyBackgroundSettings();
   const source = cover?.currentSrc || cover?.src || "";
@@ -257,7 +277,7 @@ function claimAmll() {
   const native = findNativeLyrics();
   const viewport = findViewport(native);
   if (!native || !viewport) return false;
-  syncBackground(native);
+  try { syncBackground(native); } catch (error) { console.warn("[FnMusic AMLL] 背景初始化异常，继续加载歌词：", error); }
   state.original = native;
   mount(viewport);
   native.style.setProperty("display", "none", "important");
@@ -294,11 +314,16 @@ function applySettingsStyle() {
 
 function applyBackgroundSettings() {
   if (!state.background) return;
-  state.background.setRenderScale(Math.max(0.01, Math.min(10, Number(settings.value.backgroundRenderScale) || 1)));
-  state.background.setFPS(Math.max(1, Math.min(1000, Math.round(Number(settings.value.backgroundFps) || 60))));
-  state.background.setStaticMode(!!settings.value.backgroundStaticMode);
-  state.background.setHasLyric(lines.value.length > 0);
-  state.background.setLowFreqVolume(state.lowFreqVolume);
+  try {
+    state.background.setRenderScale(Math.max(0.01, Math.min(10, Number(settings.value.backgroundRenderScale) || 1)));
+    state.background.setFPS(Math.max(1, Math.min(1000, Math.round(Number(settings.value.backgroundFps) || 60))));
+    state.background.setStaticMode(!!settings.value.backgroundStaticMode);
+    state.background.setHasLyric(lines.value.length > 0);
+    state.background.setLowFreqVolume(state.lowFreqVolume);
+  } catch (error) {
+    console.warn("[FnMusic AMLL] 背景设置应用失败，已禁用背景：", error);
+    state.background = null;
+  }
 }
 
 function applyBackgroundPlayback(nextPlaying: boolean) {
@@ -392,7 +417,10 @@ async function loadTrack(key: string, payload?: unknown) {
     const fallback = readNativeLyrics();
     if (!fallback.length) return false;
     lines.value = fallback;
-    await persistCache(cacheKey, { source: "feiniu", format: "ttml", lines: fallback, raw: linesToTtml(fallback) });
+    const existing = lyricCache.get(cacheKey);
+    if (!existing || existing.source === "feiniu") {
+      await persistCache(cacheKey, { source: "feiniu", format: "ttml", lines: fallback, raw: linesToTtml(fallback), fallback: true });
+    }
     setDebug("feiniu", "ttml", "FnMusic 页面歌词转换为标准 TTML", linesToTtml(fallback), undefined, undefined, Date.now() - state.loadStarted);
     showAmll();
     return true;
@@ -401,8 +429,14 @@ async function loadTrack(key: string, payload?: unknown) {
   try {
     await cacheReady;
     const cached = lyricCache.get(cacheKey) || lyricCache.get(key);
-    if (!cached) void fallbackToNative();
-    if (cached) {
+    if (!cached) {
+      void fallbackToNative();
+    } else if (cached.fallback && settings.value.externalLyricsEnabled) {
+      if (token !== state.loadToken) return;
+      lines.value = cached.lines.map((line) => ({ ...line, words: line.words.map((word) => ({ ...word })) }));
+      setDebug(cached.source, cached.format, "暂用 FnMusic 兜底缓存，继续查询外部歌词", cached.raw, cached.matched, cached.confidence, Date.now() - state.loadStarted);
+      showAmll();
+    } else {
       if (token !== state.loadToken) return;
       lines.value = cached.lines.map((line) => ({ ...line, words: line.words.map((word) => ({ ...word })) }));
       state.firstLyricAt = Date.now() - state.loadStarted;
@@ -423,7 +457,7 @@ async function loadTrack(key: string, payload?: unknown) {
       selected = result;
       lines.value = result.lines;
       if (!state.firstLyricAt) state.firstLyricAt = Date.now() - state.loadStarted;
-      void persistCache(cacheKey, { source: result.source, format: result.format, lines: result.lines, raw: result.raw, matched: result.matched, confidence: result.confidence });
+      void persistCache(cacheKey, { source: result.source, format: result.format, lines: result.lines, raw: result.raw, matched: result.matched, confidence: result.confidence, fallback: false });
       setDebug(result.source, result.format, `${result.debug || "歌词成功"}；匹配度 ${result.confidence || 0}%`, result.raw, result.matched, result.confidence, Date.now() - state.loadStarted);
       showAmll();
     };
