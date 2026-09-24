@@ -106,6 +106,11 @@
         <div class="setting"><div class="setting-copy"><div class="setting-label">关键词</div></div><input id="manualQuery" type="text" placeholder="留空使用当前歌曲"></div>
         <div class="actions"><button class="action" id="manualSearch" type="button">搜索歌词</button><button class="action secondary" id="manualApply" type="button">应用选中歌词</button></div>
         <select id="manualResults" size="5"></select><div id="manualStatus" class="hint"></div>
+        <h2>编辑当前歌词</h2>
+        <p class="hint">读取当前歌词后可手动修正，再应用回当前歌曲。支持 TTML/LRC 文本。</p>
+        <div class="actions"><button class="action secondary" id="loadCurrentLyrics" type="button">读取当前歌词</button><button class="action" id="applyEditedLyrics" type="button">应用编辑后的歌词</button></div>
+        <textarea id="lyricEditor" style="width:100%;min-height:140px;margin-top:10px;border:1px solid #554966;border-radius:5px;padding:8px;background:#241d2d;color:#fff;font:12px/1.4 Consolas,monospace;" placeholder="点击“读取当前歌词”，或直接粘贴 TTML / LRC"></textarea>
+        <div id="editStatus" class="hint"></div>
         <h2>调试信息</h2>
         <div class="setting"><div class="setting-copy"><div class="setting-label">显示调试信息</div></div><input id="showDebug" type="checkbox"></div>
         <pre id="debug" hidden>暂无歌词请求记录</pre>

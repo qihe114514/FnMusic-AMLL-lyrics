@@ -12,7 +12,8 @@ import { splitArtists } from "./lyrics/normalize";
 import { bindWheelScroll, type AmllPlayerLike } from "./scroll-adapter";
 
 type Source = ProviderName | "none";
-type DebugInfo = { source: Source; format: LyricFormat; matched?: string; status: string; rawPreview: string; at: string; confidence?: number; durationMs?: number };
+type ProviderAttemptDebug = { source: string; ok: boolean; durationMs?: number; confidence?: number; error?: string; debug?: string };
+type DebugInfo = { source: Source; format: LyricFormat; matched?: string; status: string; rawPreview: string; at: string; confidence?: number; durationMs?: number; attempts?: ProviderAttemptDebug[] };
 type ProviderResult = { source: ExternalProviderName; format: LyricFormat; text: string; translation?: string; romanization?: string; matched?: string; debug?: string; confidence?: number; qualified?: boolean; matchReason?: string };
 type ParsedResult = { source: ProviderName; format: LyricFormat; lines: LyricLine[]; raw: string; matched?: string; confidence: number; debug?: string; qualified: boolean; matchReason?: string; fallback?: boolean };
 
@@ -149,6 +150,14 @@ function refreshDisplayLines() {
   displayLines.value = lines.value.map((line) => settings.value.swapTranslationRomanization
     ? { ...line, words: line.words.map((word) => ({ ...word })), translatedLyric: line.romanLyric, romanLyric: line.translatedLyric }
     : line);
+}
+
+const LYRIC_CACHE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+function getCachedLyrics(key: string) {
+  const item = lyricCache.get(key);
+  if (!item) return undefined;
+  if (Date.now() - item.at > LYRIC_CACHE_TTL_MS) { lyricCache.delete(key); return undefined; }
+  return item;
 }
 
 async function persistCache(key: string, entry: Omit<NonNullable<ReturnType<typeof lyricCache.get>>, "at">) {
@@ -354,8 +363,8 @@ async function saveDebug(debug: DebugInfo) {
   chrome.runtime.sendMessage({ type: "saveLyricDebug", debug }).catch(() => {});
 }
 
-function setDebug(source: Source, format: LyricFormat, status: string, raw: string, matched?: string, confidence?: number, durationMs?: number) {
-  void saveDebug({ source, format, status, matched, rawPreview: raw.slice(0, 1000), at: new Date().toISOString(), confidence, durationMs });
+function setDebug(source: Source, format: LyricFormat, status: string, raw: string, matched?: string, confidence?: number, durationMs?: number, attempts?: ProviderAttemptDebug[]) {
+  void saveDebug({ source, format, status, matched, rawPreview: raw.slice(0, 1000), at: new Date().toISOString(), confidence, durationMs, attempts });
 }
 
 async function loadFeiniu(guid: string, payload?: unknown) {
@@ -406,6 +415,21 @@ async function loadExternalProvider(song: Song, provider: ExternalProviderName) 
   } catch {}
   if (provider === "amll") return loadAmlldbDirect(song);
   return null;
+}
+
+async function loadExternalEngine(song: Song): Promise<{ best: ProviderResult | null; attempts: ProviderAttemptDebug[] }> {
+  const order = enabledExternalProviders();
+  if (!order.length) return { best: null, attempts: [] };
+  try {
+    const response = await Promise.race([
+      chrome.runtime.sendMessage({ type: "lyrics:load", title: song.title, artist: song.artist, album: song.album, durationMs: songDurationMs(), order }),
+      new Promise<null>((resolve) => window.setTimeout(() => resolve(null), SOURCE_TIMEOUT_MS)),
+    ]);
+    if (response?.best || Array.isArray(response?.attempts)) {
+      return { best: (response?.best as ProviderResult) || null, attempts: (response?.attempts as ProviderAttemptDebug[]) || [] };
+    }
+  } catch {}
+  return { best: null, attempts: [] };
 }
 
 async function loadAmlldbDirect(song: Song): Promise<ProviderResult | null> {
@@ -490,7 +514,7 @@ async function loadTrack(key: string, payload?: unknown) {
 
   try {
     await cacheReady;
-    const cached = lyricCache.get(cacheKey) || lyricCache.get(key);
+    const cached = getCachedLyrics(cacheKey) || getCachedLyrics(key);
     if (!cached) {
       void fallbackToNative();
     } else if (cached.fallback && settings.value.externalLyricsEnabled) {
@@ -522,14 +546,28 @@ async function loadTrack(key: string, payload?: unknown) {
       if (result.source !== "feiniu" && result.fallback !== true) {
       void persistCache(cacheKey, { source: result.source, format: result.format, lines: result.lines, raw: result.raw, matched: result.matched, confidence: result.confidence, fallback: false });
     }
-      setDebug(result.source, result.format, `${result.debug || "歌词成功"}；匹配度 ${result.confidence || 0}%`, result.raw, result.matched, result.confidence, Date.now() - state.loadStarted);
+      setDebug(result.source, result.format, `${result.debug || "歌词成功"}；匹配度 ${result.confidence || 0}%`, result.raw, result.matched, result.confidence, Date.now() - state.loadStarted, attempts);
       showAmll();
     };
 
-    const externalTasks = enabledExternalProviders().map((provider) => loadExternalProvider(song, provider).then((raw) => {
-      const parsed = raw ? parseProviderResult(raw) : null;
-      if (parsed) commit(parsed);
-    }).catch(() => {}));
+    let attempts: ProviderAttemptDebug[] = [];
+    const externalTask = (async () => {
+      if (!settings.value.externalLyricsEnabled) return;
+      const engine = await loadExternalEngine(song);
+      attempts = engine.attempts;
+      if (engine.best) {
+        const parsed = parseProviderResult(engine.best);
+        if (parsed) {
+          commit(parsed);
+          return;
+        }
+      }
+      if (providerEnabled("amll")) {
+        const direct = await loadAmlldbDirect(song);
+        const parsed = direct ? parseProviderResult(direct) : null;
+        if (parsed) commit(parsed);
+      }
+    })();
 
     let nativeResult: ParsedResult | null = null;
     const nativeTask = loadFeiniu(state.trackGUID, payload).then((native) => {
@@ -558,7 +596,7 @@ async function loadTrack(key: string, payload?: unknown) {
       })();
     }, 4_000);
 
-    await Promise.allSettled([...externalTasks, nativeTask]);
+    await Promise.allSettled([externalTask, nativeTask]);
     if (token !== state.loadToken) return;
     if (!selected && nativeResult) commit(nativeResult);
     if (!selected && await fallbackToNative()) return;
@@ -671,6 +709,13 @@ const observer = new MutationObserver(() => {
 });
 observer.observe(document.documentElement, { childList: true, subtree: true });
 
+window.addEventListener("online", () => {
+  chrome.runtime.sendMessage({ type: "clearNegativeLyricCache" }).catch(() => {});
+  const song = readSong();
+  const key = trackKey(song);
+  void loadTrack(key);
+});
+
 bindWheelScroll(() => state.root, () => playerRef.value?.lyricPlayer?.value as AmllPlayerLike | undefined);
 window.postMessage({ source: "fnmusic-amll-request-track" }, "*");
 chrome.runtime.sendMessage({ type: "getSettings" }).then((saved) => { if (saved) Object.assign(settings.value, saved); applySettingsStyle(); }).catch(() => {});
@@ -706,6 +751,10 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (message?.type === "getSongInfo") {
     const song = readSong();
     sendResponse({ ...song, durationMs: songDurationMs() });
+    return;
+  }
+  if (message?.type === "getCurrentLyrics") {
+    sendResponse({ ok: true, source: "current", format: "ttml", text: linesToTtml(lines.value) });
     return;
   }
   if (message?.type === "applyManualLyrics") {

@@ -1,6 +1,7 @@
 import { DEFAULT_SETTINGS, SOURCE_TIMEOUT_MS, CACHE_TTL_MS, type ExternalProviderName } from "./settings";
 import { evaluateMatch, normalizeSongKey, type MatchCandidate, type MatchInput, type MatchResult } from "./matcher";
 import { buildAmllQueryVariants } from "./lyrics/query-plan";
+import { PROVIDER_REGISTRY } from "./lyrics/sources.registry";
 import { splitArtists } from "./lyrics/normalize";
 
 type ExternalRequest = {
@@ -34,12 +35,32 @@ type Candidate = MatchCandidate & {
 
 const providerCache = new Map<string, { at: number; result: ProviderMatch }>();
 const providerPending = new Map<string, Promise<ProviderMatch>>();
+const providerNegative = new Map<string, number>();
+const NEGATIVE_TTL_MS = 10 * 60 * 1000;
 
 function toMatchInput(request: Pick<ExternalRequest, "title" | "artist" | "durationMs">): MatchInput {
   return { title: request.title, artist: request.artist, durationMs: request.durationMs };
 }
 
+const hostRequestTimes = new Map<string, number[]>();
+async function waitForHostRateLimit(url: string) {
+  try {
+    const host = new URL(url).host;
+    const limit = host.includes("amll.dev") ? PROVIDER_REGISTRY.amll.requestLimitPerSecond : host.includes("kugou") ? PROVIDER_REGISTRY.kugou.requestLimitPerSecond : PROVIDER_REGISTRY.netease.requestLimitPerSecond;
+    const now = Date.now();
+    const recent = (hostRequestTimes.get(host) || []).filter((time) => now - time < 1000);
+    if (recent.length >= limit) {
+      const waitMs = Math.max(20, 1000 - (now - recent[0]) + 20);
+      await new Promise((resolve) => setTimeout(resolve, waitMs));
+    }
+    const updated = (hostRequestTimes.get(host) || []).filter((time) => Date.now() - time < 1000);
+    updated.push(Date.now());
+    hostRequestTimes.set(host, updated);
+  } catch {}
+}
+
 async function getJson(url: string, init?: RequestInit, timeoutMs = SOURCE_TIMEOUT_MS) {
+  await waitForHostRateLimit(url);
   const response = await fetch(url, { ...init, signal: init?.signal ?? AbortSignal.timeout(timeoutMs) });
   if (!response.ok) throw new Error(`HTTP ${response.status}`);
   return response.json() as Promise<any>;
@@ -261,14 +282,39 @@ async function fetchProviderCached(provider: ExternalProviderName, request: Exte
   const key = `${provider}|${normalizeSongKey(request)}`;
   const cached = providerCache.get(key);
   if (cached && Date.now() - cached.at < CACHE_TTL_MS) return cached.result;
+  const negativeAt = providerNegative.get(key);
+  if (negativeAt && Date.now() - negativeAt < NEGATIVE_TTL_MS) throw new Error("最近获取失败，请稍后重试");
   const pending = providerPending.get(key);
   if (pending) return pending;
   const requestPromise = providerLoaders[provider](request).then((result) => {
     providerCache.set(key, { at: Date.now(), result });
+    providerNegative.delete(key);
     return result;
+  }).catch((error) => {
+    providerNegative.set(key, Date.now());
+    throw error;
   }).finally(() => providerPending.delete(key));
   providerPending.set(key, requestPromise);
   return requestPromise;
+}
+
+type ProviderAttempt = { source: ExternalProviderName; ok: boolean; durationMs: number; confidence?: number; debug?: string; error?: string };
+async function loadLyricsEngine(request: ExternalRequest, order: ExternalProviderName[]) {
+  const tasks = order.map(async (source): Promise<ProviderAttempt> => {
+    const startedAt = Date.now();
+    try {
+      const result = await fetchProviderCached(source, request);
+      return { source, ok: true, durationMs: Date.now() - startedAt, confidence: result.confidence, debug: result.debug };
+    } catch (error) {
+      return { source, ok: false, durationMs: Date.now() - startedAt, error: error instanceof Error ? error.message : String(error) };
+    }
+  });
+  const attempts = await Promise.all(tasks);
+  const best = attempts
+    .filter((attempt) => attempt.ok)
+    .sort((left, right) => order.indexOf(left.source) - order.indexOf(right.source) || (right.confidence || 0) - (left.confidence || 0))[0];
+  const bestMatch = best ? providerCache.get(`${best.source}|${normalizeSongKey(request)}`)?.result || null : null;
+  return { best: bestMatch, attempts };
 }
 
 chrome.runtime.onMessage.addListener((message: ExternalRequest | { type: string }, _sender, sendResponse) => {
@@ -291,9 +337,15 @@ chrome.runtime.onMessage.addListener((message: ExternalRequest | { type: string 
     }).catch(() => sendResponse({ ok: false }));
     return true;
   }
+  if (message.type === "clearNegativeLyricCache") {
+    providerNegative.clear();
+    sendResponse({ ok: true });
+    return true;
+  }
   if (message.type === "clearLyricCache") {
     providerCache.clear();
     providerPending.clear();
+    providerNegative.clear();
     chrome.storage.local.remove("lyricCache").then(() => sendResponse({ ok: true })).catch(() => sendResponse({ ok: false }));
     return true;
   }
@@ -305,6 +357,14 @@ chrome.runtime.onMessage.addListener((message: ExternalRequest | { type: string 
   }
   if (message.type === "fetchManualLyrics") {
     fetchManualLyrics((message as any).item).then(sendResponse).catch((error) => sendResponse({ ok: false, error: error instanceof Error ? error.message : String(error) }));
+    return true;
+  }
+  if ((message as any).type === "lyrics:load") {
+    const payload = message as any;
+    const requestedOrder: ExternalProviderName[] = Array.isArray(payload.order) ? payload.order.filter((item: string) => ["amll", "kugou", "netease"].includes(item)) as ExternalProviderName[] : ["amll", "kugou", "netease"];
+    const order: ExternalProviderName[] = requestedOrder.length ? requestedOrder : ["amll", "kugou", "netease"];
+    const request: ExternalRequest = { type: "fetchProviderLyrics", title: String(payload.title || ""), artist: payload.artist, album: payload.album, durationMs: payload.durationMs };
+    loadLyricsEngine(request, order).then(sendResponse).catch((error) => sendResponse({ ok: false, error: error instanceof Error ? error.message : String(error), attempts: [] }));
     return true;
   }
   if (message.type !== "fetchProviderLyrics") return;

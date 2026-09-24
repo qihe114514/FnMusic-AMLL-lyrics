@@ -68,7 +68,16 @@ const renderDebug = (debug) => {
   const element = document.getElementById("debug");
   if (!element) return;
   if (!debug) { element.textContent = "暂无歌词请求记录"; return; }
-  element.textContent = [`来源：${debug.source || "none"}`, `格式：${debug.format || "text"}`, `状态：${debug.status || ""}`, debug.matched ? `匹配：${debug.matched}` : "", debug.confidence ? `匹配度：${debug.confidence}%` : "", debug.durationMs !== undefined ? `耗时：${debug.durationMs}ms` : "", debug.at ? `时间：${debug.at}` : "", debug.rawPreview ? `\n${debug.rawPreview}` : ""].filter(Boolean).join("\n");
+  const attemptLines = Array.isArray(debug.attempts)
+    ? ["", "来源尝试：", ...debug.attempts.map((attempt) => {
+        const status = attempt.ok ? "成功" : "失败";
+        const duration = attempt.durationMs !== undefined ? ` ${attempt.durationMs}ms` : "";
+        const confidence = attempt.confidence !== undefined ? ` 匹配度 ${attempt.confidence}%` : "";
+        const error = attempt.error ? `（${attempt.error}）` : "";
+        return `  ${attempt.source}: ${status}${duration}${confidence}${error}`;
+      })]
+    : [];
+  element.textContent = [`来源：${debug.source || "none"}`, `格式：${debug.format || "text"}`, `状态：${debug.status || ""}`, debug.matched ? `匹配：${debug.matched}` : "", debug.confidence ? `匹配度：${debug.confidence}%` : "", debug.durationMs !== undefined ? `耗时：${debug.durationMs}ms` : "", debug.at ? `时间：${debug.at}` : "", ...attemptLines, debug.rawPreview ? `\n${debug.rawPreview}` : ""].filter(Boolean).join("\n");
 };
 
 const updateCacheStats = async () => {
@@ -126,6 +135,26 @@ document.getElementById("manualApply")?.addEventListener("click", async () => {
   if (!response?.ok) { if (status) status.textContent = response?.error || "获取歌词失败"; return; }
   await chrome.tabs.sendMessage(tab.id, { type: "applyManualLyrics", payload: response }).catch(() => {});
   if (status) status.textContent = "已应用到当前歌曲";
+});
+
+document.getElementById("loadCurrentLyrics")?.addEventListener("click", async () => {
+  const status = document.getElementById("editStatus");
+  const editor = document.getElementById("lyricEditor");
+  const tab = await getActiveTab();
+  if (!tab?.id || !editor) { if (status) status.textContent = "没有可用的播放页面"; return; }
+  const response = await chrome.tabs.sendMessage(tab.id, { type: "getCurrentLyrics" }).catch(() => null);
+  if (!response?.ok) { if (status) status.textContent = "读取当前歌词失败"; return; }
+  editor.value = response.text || "";
+  if (status) status.textContent = "已读取当前歌词";
+});
+
+document.getElementById("applyEditedLyrics")?.addEventListener("click", async () => {
+  const status = document.getElementById("editStatus");
+  const editor = document.getElementById("lyricEditor");
+  const tab = await getActiveTab();
+  if (!tab?.id || !editor || !editor.value.trim()) { if (status) status.textContent = "没有可应用的歌词文本"; return; }
+  const response = await chrome.tabs.sendMessage(tab.id, { type: "applyManualLyrics", payload: { text: editor.value, format: "ttml", source: "manual", debug: "手动编辑歌词" } }).catch(() => null);
+  if (status) status.textContent = response?.ok ? "已应用编辑后的歌词" : "应用失败";
 });
 
 const versionElement = document.getElementById("aboutVersion");
