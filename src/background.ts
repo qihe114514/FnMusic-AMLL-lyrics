@@ -1,5 +1,7 @@
 import { DEFAULT_SETTINGS, SOURCE_TIMEOUT_MS, CACHE_TTL_MS, type ExternalProviderName } from "./settings";
 import { evaluateMatch, normalizeSongKey, type MatchCandidate, type MatchInput, type MatchResult } from "./matcher";
+import { buildAmllQueryVariants } from "./lyrics/query-plan";
+import { splitArtists } from "./lyrics/normalize";
 
 type ExternalRequest = {
   type: "fetchProviderLyrics";
@@ -96,11 +98,23 @@ function resultFromMatch(
 }
 
 async function fetchAmlldb(request: ExternalRequest) {
-  const params = new URLSearchParams({ musicName: request.title, page: "1", pageSize: "10" });
-  if (request.artist) params.set("artistName", request.artist);
-  const search = await getJson(`https://api.amll.dev/v1/lyrics/search?${params}`);
-  const items = Array.isArray(search?.data?.items) ? search.data.items : [];
-  const matchInput = request;
+  const artistTokens = request.artist ? request.artist.split(/[s,，、/&＆;；+·・|]+/).map((item) => item.trim()).filter(Boolean) : [];
+  const variants = buildAmllQueryVariants({ title: request.title, artists: artistTokens });
+  const itemMap = new Map<string, any>();
+  for (const variant of variants) {
+    try {
+      const params = new URLSearchParams({ musicName: variant.musicName, page: "1", pageSize: "10" });
+      if (variant.artistName) params.set("artistName", variant.artistName);
+      const search = await getJson(`https://api.amll.dev/v1/lyrics/search?${params}`);
+      const items = Array.isArray(search?.data?.items) ? search.data.items : [];
+      for (const item of items) {
+        if (item?.id !== undefined) itemMap.set(String(item.id), item);
+      }
+    } catch {
+      // try next query variant
+    }
+  }
+  const items = [...itemMap.values()];
   const candidates: Candidate[] = items.map((item: any) => ({
     raw: item,
     id: item.id,
@@ -108,7 +122,7 @@ async function fetchAmlldb(request: ExternalRequest) {
     artist: item.artistNames?.join(" / ") || "",
     durationMs: candidateDuration(item),
   }));
-  const ranked = rankCandidates(matchInput, candidates).filter((entry) => entry.match.qualified).slice(0, 3);
+  const ranked = rankCandidates(request, candidates).filter((entry) => entry.match.qualified).slice(0, 3);
   if (!ranked.length) throw new Error("AMLL 无匹配歌词");
 
   const results = await Promise.all(ranked.map(async ({ candidate, match }) => {
@@ -116,7 +130,7 @@ async function fetchAmlldb(request: ExternalRequest) {
       const result = await getJson(`https://api.amll.dev/v1/lyrics/get?id=${encodeURIComponent(String(candidate.id))}`);
       const text = result?.data?.lyrics;
       if (typeof text !== "string" || !text.trim() || !hasTimedLyric(text)) return null;
-      return resultFromMatch("amll", "ttml", text, candidate.title, match, { detail: `AMLL TTML API #${candidate.id}` });
+      return resultFromMatch("amll", "ttml", text, candidate.title, match, { detail: `AMLL #${candidate.id}` });
     } catch {
       return null;
     }

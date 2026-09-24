@@ -7,6 +7,8 @@ import { resolvePlaybackClock, type PlaybackAnchor } from "./playback-clock";
 import { linesToTtml, mergeRomanization, mergeTranslation, normalizeLyrics, parseLyricText, type LyricFormat, type LyricLine, type Song } from "./shared";
 import { DEFAULT_SETTINGS, PROVIDER_PRIORITY, SOURCE_TIMEOUT_MS, type ExternalProviderName, type ProviderName, type Settings } from "./settings";
 import { evaluateMatch, normalizeSongKey } from "./matcher";
+import { buildAmllQueryVariants } from "./lyrics/query-plan";
+import { splitArtists } from "./lyrics/normalize";
 import { bindWheelScroll, type AmllPlayerLike } from "./scroll-adapter";
 
 type Source = ProviderName | "none";
@@ -408,17 +410,26 @@ async function loadExternalProvider(song: Song, provider: ExternalProviderName) 
 
 async function loadAmlldbDirect(song: Song): Promise<ProviderResult | null> {
   try {
-    const params = new URLSearchParams({ musicName: song.title, page: "1", pageSize: "10" });
-    if (song.artist) params.set("artistName", song.artist);
-    const search = await fetch(`https://api.amll.dev/v1/lyrics/search?${params}`, { signal: AbortSignal.timeout(SOURCE_TIMEOUT_MS) }).then((response) => response.json());
-    const items = Array.isArray(search?.data?.items) ? search.data.items : [];
-    const candidates = items.map((item: any) => ({
+    const variants = buildAmllQueryVariants({ title: song.title, artists: song.artist ? [song.artist] : [] });
+    const itemMap = new Map<string, any>();
+    for (const variant of variants) {
+      try {
+        const params = new URLSearchParams({ musicName: variant.musicName, page: "1", pageSize: "10" });
+        if (variant.artistName) params.set("artistName", variant.artistName);
+        const search = await fetch(`https://api.amll.dev/v1/lyrics/search?${params}`, { signal: AbortSignal.timeout(SOURCE_TIMEOUT_MS) }).then((response) => response.json());
+        const items = Array.isArray(search?.data?.items) ? search.data.items : [];
+        for (const item of items) if (item?.id !== undefined) itemMap.set(String(item.id), item);
+      } catch {
+        // try next variant
+      }
+    }
+    const candidates = [...itemMap.values()].map((item: any) => ({
       item,
       title: item.musicNames?.[0] || "",
       artist: item.artistNames?.join(" / ") || "",
-      match: evaluateMatch({ title: song.title, artist: song.artist, durationMs: songDurationMs() }, { title: item.musicNames?.[0] || "", artist: item.artistNames?.join(" / ") || "" }),
+      match: evaluateMatch({ title: song.title, artists: song.artist ? splitArtists(song.artist) : [], durationMs: songDurationMs() }, { title: item.musicNames?.[0] || "", artists: item.artistNames || [] }),
     })).filter((entry: any) => entry.match.qualified).slice(0, 3);
-    const results = await Promise.all(candidates.map(async (entry: any) => {
+    const results: Array<ProviderResult | null> = await Promise.all(candidates.map(async (entry: any) => {
       try {
         const detail = await fetch(`https://api.amll.dev/v1/lyrics/get?id=${encodeURIComponent(String(entry.item.id))}`, { signal: AbortSignal.timeout(SOURCE_TIMEOUT_MS) }).then((response) => response.json());
         const text = detail?.data?.lyrics;
