@@ -202,8 +202,6 @@ function syncBackground(target?: HTMLElement | null) {
   if (!nativeBackground.shadowRoot) {
     try { host = nativeBackground.attachShadow({ mode: "open" }); } catch { host = nativeBackground; }
   }
-  nativeBackground.style.setProperty("background", "transparent", "important");
-  nativeBackground.style.setProperty("background-image", "none", "important");
   const renderer = settings.value.backgroundRenderer === "pixi" ? "pixi" : "mesh";
   try {
     if (!state.backgroundRoot || !state.background || state.backgroundRenderer !== renderer) {
@@ -224,14 +222,17 @@ function syncBackground(target?: HTMLElement | null) {
       shade.style.cssText = "position:absolute;inset:0;pointer-events:none;background:linear-gradient(#0000 60%, #0000001a 100%);z-index:1;";
       state.backgroundRoot.replaceChildren(canvas, shade);
     }
-    if (state.backgroundRoot.parentNode !== host) host.appendChild(state.backgroundRoot);
   } catch (error) {
-    console.warn("[FnMusic AMLL] 背景渲染器不可用，已跳过背景创建：", error);
+    console.warn("[FnMusic AMLL] 背景渲染器不可用，保留 FnMusic 原生背景：", error);
     state.backgroundRoot?.remove();
     state.backgroundRoot = null;
     state.background = null;
     return;
   }
+  if (!state.background || !state.backgroundRoot) return;
+  nativeBackground.style.setProperty("background", "transparent", "important");
+  nativeBackground.style.setProperty("background-image", "none", "important");
+  if (state.backgroundRoot.parentNode !== host) host.appendChild(state.backgroundRoot);
   state.backgroundHost = nativeBackground;
   applyBackgroundSettings();
   const source = cover?.currentSrc || cover?.src || "";

@@ -1,6 +1,6 @@
 {
   "name": "fnmusic-amll-lyrics",
-  "version": "1.0.3",
+  "version": "1.0.4",
   "description": "FnMusic（飞牛音乐）的 Apple Music 风格歌词插件，支持 AMLL、酷狗、网易云与自带歌词回退。",
   "private": true,
   "license": "AGPL-3.0-only",
