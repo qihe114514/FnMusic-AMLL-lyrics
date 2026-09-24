@@ -91,7 +91,7 @@ function resultFromMatch(
     confidence,
     qualified: match.qualified,
     matchReason: match.reason,
-    debug: `${options.detail ? `${options.detail}；` : ""}${match.reason}；匹配度 ${confidence}%`,
+    debug: `${options.detail ? `${options.detail}，` : ""}匹配度 ${confidence}%`,
   };
 }
 

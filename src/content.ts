@@ -429,7 +429,7 @@ async function loadAmlldbDirect(song: Song): Promise<ProviderResult | null> {
           matched: entry.title,
           confidence: Math.round(entry.match.combined * 100),
           qualified: true,
-          debug: `AMLL 直连兜底 #${entry.item.id}；匹配度 ${Math.round(entry.match.combined * 100)}%`,
+          debug: `AMLL #${entry.item.id}，匹配度 ${Math.round(entry.match.combined * 100)}%`,
           matchReason: entry.match.reason,
         } satisfies ProviderResult;
       } catch {
@@ -472,7 +472,7 @@ async function loadTrack(key: string, payload?: unknown) {
     if (!existing || existing.source === "feiniu") {
       await persistCache(cacheKey, { source: "feiniu", format: "ttml", lines: fallback, raw: linesToTtml(fallback), fallback: true });
     }
-    setDebug("feiniu", "ttml", "FnMusic 页面歌词转换为标准 TTML", linesToTtml(fallback), undefined, undefined, Date.now() - state.loadStarted);
+    setDebug("feiniu", "ttml", "FnMusic 自带歌词", linesToTtml(fallback), undefined, undefined, Date.now() - state.loadStarted);
     showAmll();
     return true;
   };
@@ -485,7 +485,7 @@ async function loadTrack(key: string, payload?: unknown) {
     } else if (cached.fallback && settings.value.externalLyricsEnabled) {
       if (token !== state.loadToken) return;
       lines.value = cached.lines.map((line) => ({ ...line, words: line.words.map((word) => ({ ...word })) }));
-      setDebug(cached.source, cached.format, "暂用 FnMusic 兜底缓存，继续查询外部歌词", cached.raw, cached.matched, cached.confidence, Date.now() - state.loadStarted);
+      setDebug(cached.source, cached.format, "FnMusic 自带歌词（同时匹配 AMLL / 酷狗 / 网易云）", cached.raw, cached.matched, cached.confidence, Date.now() - state.loadStarted);
       showAmll();
     } else {
       if (token !== state.loadToken) return;
